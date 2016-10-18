@@ -260,8 +260,7 @@ get(Preflist, BKey, ReqId) ->
     get(Preflist, BKey, ReqId, {fsm, undefined, self()}).
 
 get(Preflist, BKey, ReqId, Sender) ->
-    Req = ?KV_GET_REQ{bkey=sanitize_bkey(BKey),
-                      req_id=ReqId},
+    Req = riak_kv_requests:new_get_request(sanitize_bkey(BKey), ReqId),
     riak_core_vnode_master:command(Preflist,
                                    Req,
                                    Sender,
@@ -523,8 +522,6 @@ init([Index]) ->
     end.
 
 
-handle_overload_command(?KV_GET_REQ{req_id=ReqID}, Sender, Idx) ->
-    riak_core_vnode:reply(Sender, {r, {error, overload}, Idx, ReqID});
 handle_overload_command(?KV_VNODE_STATUS_REQ{}, Sender, Idx) ->
     riak_core_vnode:reply(Sender, {vnode_status, Idx, [{error, overload}]});
 handle_overload_command(?KV_W1C_PUT_REQ{type=Type}, Sender, _Idx) ->
@@ -534,6 +531,9 @@ handle_overload_command(Req, Sender, Idx) ->
 
 handle_overload_request(kv_put_request, _Req, Sender, Idx) ->
     riak_core_vnode:reply(Sender, {fail, Idx, overload});
+handle_overload_request(kv_get_request, Req, Sender, Idx) ->
+    ReqId = riak_kv_requests:get_request_id(Req),
+    riak_core_vnode:reply(Sender, {r, {error, overload}, Idx, ReqId});
 handle_overload_request(_, _Req, Sender, _Idx) ->
     riak_core_vnode:reply(Sender, {error, mailbox_overload}).
 
@@ -553,8 +553,6 @@ handle_overload_info({raw_forward_get, _, From}, _Idx) ->
 handle_overload_info(_, _) ->
     ok.
 
-handle_command(?KV_GET_REQ{bkey=BKey,req_id=ReqId},Sender,State) ->
-    do_get(Sender, BKey, ReqId, State);
 handle_command(#riak_kv_listkeys_req_v2{bucket=Input, req_id=ReqId, caller=Caller}, _Sender,
                State=#state{async_folding=AsyncFolding,
                             key_buf_size=BufferSize,
@@ -894,7 +892,11 @@ handle_request(kv_put_request, Req, Sender, #state{idx = Idx} = State) ->
     riak_core_vnode:reply(Sender, {w, Idx, ReqId}),
     {_Reply, UpdState} = do_put(Sender, Req, State),
     update_vnode_stats(vnode_put, Idx, StartTS),
-    {noreply, UpdState}.
+    {noreply, UpdState};
+handle_request(kv_get_request, Req, Sender, State) ->
+    BKey = riak_kv_requests:get_bucket_key(Req),
+    ReqId = riak_kv_requests:get_request_id(Req),
+    do_get(Sender, BKey, ReqId, State).
 
 
 

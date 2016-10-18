@@ -53,10 +53,7 @@ rewrite_cast({vnode_put, {Partition,_Node},
 rewrite_cast({vnode_get, {Partition,_Node},
               {FSM_pid,BKey,ReqId}}) ->
     Req = riak_core_vnode_master:make_request(
-            ?KV_GET_REQ{
-               bkey = BKey,
-               req_id = ReqId
-              },
+            riak_kv_requests:new_get_request(BKey, ReqId),
             {fsm, undefined, FSM_pid},
             Partition),
     {ok, Req};
