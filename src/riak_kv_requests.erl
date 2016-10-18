@@ -27,9 +27,12 @@
 
 -export([new_put_request/5,
          new_get_request/2,
+         new_w1c_put_request/3,
          is_coordinated_put/1,
          get_bucket_key/1,
          get_object/1,
+         get_encoded_obj/1,
+         get_replica_type/1,
          set_object/2,
          get_request_id/1,
          get_start_time/1,
@@ -42,6 +45,8 @@
 -type request_id() :: non_neg_integer().
 -type start_time() :: non_neg_integer().
 -type request_options() :: [any()].
+-type replica_type() :: primary | fallback.
+-type encoded_obj() :: binary().
 
 -record(riak_kv_put_req_v1,
         { bkey :: bucket_key(),
@@ -54,14 +59,24 @@
           bkey :: bucket_key(),
           req_id :: request_id()}).
 
+-record(riak_kv_w1c_put_req_v1, {
+    bkey :: bucket_key(),
+    encoded_obj :: encoded_obj(),
+    type :: replica_type()
+    % start_time :: non_neg_integer(), Jon to add?
+}).
+
+
 -opaque put_request() :: #riak_kv_put_req_v1{}.
 -opaque get_request() :: #riak_kv_get_req_v1{}.
--type request() :: put_request() | get_request().
+-opaque w1c_put_request() :: #riak_kv_w1c_put_req_v1{}.
+-type request() :: put_request() | get_request() | w1c_put_request().
 
--type request_type() :: kv_put_request | kv_get_request | unknown.
+-type request_type() :: kv_put_request | kv_get_request | kv_w1c_put_request | unknown.
 
 -export_type([put_request/0,
               get_request/0,
+              w1c_put_request/0,
               request/0,
               request_type/0]).
 
@@ -92,15 +107,29 @@ new_put_request(BKey, Object, ReqId, StartTime, Options) ->
 new_get_request(BKey, ReqId) ->
     #riak_kv_get_req_v1{bkey = BKey, req_id = ReqId}.
 
+-spec new_w1c_put_request(bucket_key(), encoded_obj(), replica_type()) -> w1c_put_request().
+new_w1c_put_request(BKey, EncodedObj, ReplicaType) ->
+    #riak_kv_w1c_put_req_v1{bkey = BKey, encoded_obj = EncodedObj, type = ReplicaType}.
+
 -spec is_coordinated_put(put_request()) -> boolean().
 is_coordinated_put(#riak_kv_put_req_v1{options=Options}) ->
     proplists:get_value(coord, Options, false).
 
-get_bucket_key(#riak_kv_put_req_v1{bkey=BKey}) ->
+get_bucket_key(#riak_kv_put_req_v1{bkey = BKey}) ->
+    BKey;
+get_bucket_key(#riak_kv_w1c_put_req_v1{bkey = BKey}) ->
     BKey.
+
+-spec get_encoded_obj(request()) -> encoded_obj().
+get_encoded_obj(#riak_kv_w1c_put_req_v1{encoded_obj = EncodedObj}) ->
+    EncodedObj.
 
 get_object(#riak_kv_put_req_v1{object = Object}) ->
     Object.
+
+-spec get_replica_type(request()) -> replica_type().
+get_replica_type(#riak_kv_w1c_put_req_v1{type = Type}) ->
+    Type.
 
 -spec get_request_id(request()) -> request_id().
 get_request_id(#riak_kv_put_req_v1{req_id = ReqId}) ->

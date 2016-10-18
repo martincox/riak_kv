@@ -524,8 +524,6 @@ init([Index]) ->
 
 handle_overload_command(?KV_VNODE_STATUS_REQ{}, Sender, Idx) ->
     riak_core_vnode:reply(Sender, {vnode_status, Idx, [{error, overload}]});
-handle_overload_command(?KV_W1C_PUT_REQ{type=Type}, Sender, _Idx) ->
-    riak_core_vnode:reply(Sender, ?KV_W1C_PUT_REPLY{reply={error, overload}, type=Type});
 handle_overload_command(Req, Sender, Idx) ->
     handle_overload_request(riak_kv_requests:request_type(Req), Req, Sender, Idx).
 
@@ -534,6 +532,10 @@ handle_overload_request(kv_put_request, _Req, Sender, Idx) ->
 handle_overload_request(kv_get_request, Req, Sender, Idx) ->
     ReqId = riak_kv_requests:get_request_id(Req),
     riak_core_vnode:reply(Sender, {r, {error, overload}, Idx, ReqId});
+handle_overload_request(kv_w1c_put_request, Req, Sender, _Idx) ->
+    Type = riak_kv_requests:get_replica_type(Req),
+    riak_core_vnode:reply(Sender, ?KV_W1C_PUT_REPLY{reply={error, overload}, type=Type});
+
 handle_overload_request(_, _Req, Sender, _Idx) ->
     riak_core_vnode:reply(Sender, {error, mailbox_overload}).
 
@@ -857,29 +859,6 @@ handle_command({get_index_entries, Opts},
             {reply, ignore, State}
     end;
 
-%% NB. The following two function clauses discriminate on the async_put State field
-handle_command(?KV_W1C_PUT_REQ{bkey={Bucket, Key}, encoded_obj=EncodedVal, type=Type},
-                From, State=#state{mod=Mod, async_put=true, modstate=ModState}) ->
-    StartTS = os:timestamp(),
-    Context = {w1c_async_put, From, Type, Bucket, Key, EncodedVal, StartTS},
-    case Mod:async_put(Context, Bucket, Key, EncodedVal, ModState) of
-        {ok, UpModState} ->
-            {noreply, State#state{modstate=UpModState}};
-        {error, Reason, UpModState} ->
-            {reply, ?KV_W1C_PUT_REPLY{reply={error, Reason}, type=Type}, State#state{modstate=UpModState}}
-    end;
-handle_command(?KV_W1C_PUT_REQ{bkey={Bucket, Key}, encoded_obj=EncodedVal, type=Type},
-                _From, State=#state{idx=Idx, mod=Mod, async_put=false, modstate=ModState}) ->
-    StartTS = os:timestamp(),
-    case Mod:put(Bucket, Key, [], EncodedVal, ModState) of
-        {ok, UpModState} ->
-            update_hashtree(Bucket, Key, EncodedVal, State),
-            ?INDEX_BIN(Bucket, Key, EncodedVal, put, Idx),
-            update_vnode_stats(vnode_put, Idx, StartTS),
-            {reply, ?KV_W1C_PUT_REPLY{reply=ok, type=Type}, State#state{modstate=UpModState}};
-        {error, Reason, UpModState} ->
-            {reply, ?KV_W1C_PUT_REPLY{reply={error, Reason}, type=Type}, State#state{modstate=UpModState}}
-    end;
 handle_command(Req, Sender, State) ->
     handle_request(riak_kv_requests:request_type(Req), Req, Sender, State).
 
@@ -896,7 +875,40 @@ handle_request(kv_put_request, Req, Sender, #state{idx = Idx} = State) ->
 handle_request(kv_get_request, Req, Sender, State) ->
     BKey = riak_kv_requests:get_bucket_key(Req),
     ReqId = riak_kv_requests:get_request_id(Req),
-    do_get(Sender, BKey, ReqId, State).
+    do_get(Sender, BKey, ReqId, State);
+%% NB. The following two function clauses discriminate on the async_put State field
+handle_request(kv_w1c_put_request, Req, Sender, State=#state{async_put=true}) ->
+    {Bucket, Key} = riak_kv_requests:get_bucket_key(Req),
+    EncodedVal = riak_kv_requests:get_encoded_obj(Req),
+    ReplicaType = riak_kv_requests:get_replica_type(Req),
+    Mod = State#state.mod,
+    ModState = State#state.modstate,
+    StartTS = os:timestamp(),
+    Context = {w1c_async_put, Sender, ReplicaType, Bucket, Key, EncodedVal, StartTS},
+    case Mod:async_put(Context, Bucket, Key, EncodedVal, ModState) of
+        {ok, UpModState} ->
+            {noreply, State#state{modstate=UpModState}};
+        {error, Reason, UpModState} ->
+            {reply, ?KV_W1C_PUT_REPLY{reply={error, Reason}, type=ReplicaType}, State#state{modstate=UpModState}}
+    end;
+handle_request(kv_w1c_put_request, Req, _Sender, State=#state{async_put=false}) ->
+    {Bucket, Key} = riak_kv_requests:get_bucket_key(Req),
+    EncodedVal = riak_kv_requests:get_encoded_obj(Req),
+    ReplicaType = riak_kv_requests:get_replica_type(Req),
+    Mod = State#state.mod,
+    ModState = State#state.modstate,
+    Idx = State#state.idx,
+    StartTS = os:timestamp(),
+    case Mod:put(Bucket, Key, [], EncodedVal, ModState) of
+        {ok, UpModState} ->
+            update_hashtree(Bucket, Key, EncodedVal, State),
+            ?INDEX_BIN(Bucket, Key, EncodedVal, put, Idx),
+            update_vnode_stats(vnode_put, Idx, StartTS),
+            {reply, ?KV_W1C_PUT_REPLY{reply=ok, type=ReplicaType}, State#state{modstate=UpModState}};
+        {error, Reason, UpModState} ->
+            {reply, ?KV_W1C_PUT_REPLY{reply={error, Reason}, type=ReplicaType}, State#state{modstate=UpModState}}
+    end.
+
 
 
 
@@ -1062,18 +1074,6 @@ handle_coverage_fold(FoldType, Bucket, ItemFilter, ResultFun,
 %% that was already handed off.  This is benign as the tombstone will
 %% eventually be re-deleted. NOTE: this makes write requests N+M where
 %% M is the number of vnodes forwarding.
-handle_handoff_command(?KV_W1C_PUT_REQ{}=Request, Sender, State) ->
-    NewState0 = case handle_command(Request, Sender, State) of
-        {noreply, NewState} ->
-            NewState;
-        {reply, Reply, NewState} ->
-            %% reply directly to the sender, as we will be forwarding the
-            %% the request on to the handoff node.
-            riak_core_vnode:reply(Sender, Reply),
-            NewState
-    end,
-    {forward, NewState0};
-
 handle_handoff_command(Req, Sender, State) ->
     ReqType = riak_kv_requests:request_type(Req),
     handle_handoff_request(ReqType, Req, Sender, State).
@@ -1108,6 +1108,17 @@ handle_handoff_request(kv_put_request, Req, Sender, State) ->
                     {noreply, UpdState}
             end
     end;
+handle_handoff_request(kv_w1c_put_request, Request, Sender, State) ->
+    NewState0 = case handle_command(Request, Sender, State) of
+        {noreply, NewState} ->
+            NewState;
+        {reply, Reply, NewState} ->
+            %% reply directly to the sender, as we will be forwarding the
+            %% the request on to the handoff node.
+            riak_core_vnode:reply(Sender, Reply),
+            NewState
+    end,
+    {forward, NewState0};
 handle_handoff_request(_Other, Req, Sender, State) ->
     %% @todo: this should be based on the type of the request when the
     %%        hiding of records is complete.

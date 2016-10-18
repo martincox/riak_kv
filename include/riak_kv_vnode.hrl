@@ -1,13 +1,6 @@
 -include_lib("riak_core/include/riak_core_vnode.hrl").
 
 
--record(riak_kv_w1c_put_req_v1, {
-    bkey :: {binary(),binary()},
-    encoded_obj :: binary(),
-    type :: primary | fallback
-    % start_time :: non_neg_integer(), Jon to add?
-}).
-
 -record(riak_kv_w1c_put_reply_v1, {
     reply :: ok | {error, term()},
     type :: primary | fallback
