@@ -70,6 +70,10 @@
     % start_time :: non_neg_integer(), Jon to add?
 }).
 
+-record(riak_kv_listkeys_req_v3, {
+          bucket :: bucket(),
+          item_filter :: function()}).
+
 %% same as _v3, but triggers ack-based backpressure
 -record(riak_kv_listkeys_req_v4, {
           bucket :: bucket(),
