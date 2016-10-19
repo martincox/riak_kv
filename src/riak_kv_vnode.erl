@@ -535,7 +535,6 @@ handle_overload_request(kv_get_request, Req, Sender, Idx) ->
 handle_overload_request(kv_w1c_put_request, Req, Sender, _Idx) ->
     Type = riak_kv_requests:get_replica_type(Req),
     riak_core_vnode:reply(Sender, ?KV_W1C_PUT_REPLY{reply={error, overload}, type=Type});
-
 handle_overload_request(_, _Req, Sender, _Idx) ->
     riak_core_vnode:reply(Sender, {error, mailbox_overload}).
 

@@ -50,7 +50,6 @@
           bkeys = [] :: [{binary(), binary()}]
          }).
 
--define(KV_W1C_PUT_REQ, #riak_kv_w1c_put_req_v1).
 -define(KV_W1C_PUT_REPLY, #riak_kv_w1c_put_reply_v1).
 -define(KV_LISTBUCKETS_REQ, #riak_kv_listbuckets_req_v1).
 -define(KV_LISTKEYS_REQ, #riak_kv_listkeys_req_v4).

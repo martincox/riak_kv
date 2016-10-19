@@ -83,6 +83,7 @@
 -spec request_type(request()) -> request_type().
 request_type(#riak_kv_put_req_v1{}) -> kv_put_request;
 request_type(#riak_kv_get_req_v1{}) -> kv_get_request;
+request_type(#riak_kv_w1c_put_req_v1{}) -> kv_w1c_put_request;
 request_type(_) -> unknown.
 
 request_hash(#riak_kv_put_req_v1{bkey=BKey}) ->
