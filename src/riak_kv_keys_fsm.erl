@@ -66,8 +66,7 @@ use_ack_backpressure() ->
 req(Bucket, ItemFilter) ->
     case use_ack_backpressure() of
         true ->
-            ?KV_LISTKEYS_REQ{bucket=Bucket,
-                             item_filter=ItemFilter};
+            riak_kv_requests:new_listkeys_request(Bucket, ItemFilter);
         false ->
             #riak_kv_listkeys_req_v3{bucket=Bucket,
                                      item_filter=ItemFilter}

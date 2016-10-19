@@ -943,19 +943,12 @@ handle_coverage(?KV_LISTBUCKETS_REQ{item_filter=ItemFilter},
         _ ->
             {noreply, State}
     end;
+
 handle_coverage(#riak_kv_listkeys_req_v3{bucket=Bucket,
                                          item_filter=ItemFilter},
                 FilterVNodes, Sender, State) ->
     %% v3 == no backpressure
     ResultFun = result_fun(Bucket, Sender),
-    Opts = [{bucket, Bucket}],
-    handle_coverage_keyfold(Bucket, ItemFilter, ResultFun,
-                            FilterVNodes, Sender, Opts, State);
-handle_coverage(?KV_LISTKEYS_REQ{bucket=Bucket,
-                                 item_filter=ItemFilter},
-                FilterVNodes, Sender, State) ->
-    %% v4 == ack-based backpressure
-    ResultFun = result_fun_ack(Bucket, Sender),
     Opts = [{bucket, Bucket}],
     handle_coverage_keyfold(Bucket, ItemFilter, ResultFun,
                             FilterVNodes, Sender, Opts, State);
@@ -972,7 +965,22 @@ handle_coverage(?KV_INDEX_REQ{bucket=Bucket,
                 FilterVNodes, Sender, State) ->
     %% v2 = ack-based backpressure
     handle_coverage_index(Bucket, ItemFilter, Query,
-                          FilterVNodes, Sender, State, fun result_fun_ack/2).
+                          FilterVNodes, Sender, State, fun result_fun_ack/2);
+handle_coverage(Req, FilterVNodes, Sender, State) ->
+    handle_coverage_request(riak_kv_requests:request_type(Req),
+                            Req,
+                            FilterVNodes,
+                            Sender,
+                            State).
+
+handle_coverage_request(kv_listkeys_request, Req, FilterVNodes, Sender, State) ->
+    %% v4 == ack-based backpressure
+    Bucket = riak_kv_requests:get_bucket(Req),
+    ItemFilter = riak_kv_requests:get_item_filter(Req),
+    ResultFun = result_fun_ack(Bucket, Sender),
+    Opts = [{bucket, Bucket}],
+    handle_coverage_keyfold(Bucket, ItemFilter, ResultFun,
+                            FilterVNodes, Sender, Opts, State).
 
 -spec prepare_index_query(?KV_INDEX_Q{}) -> ?KV_INDEX_Q{}.
 prepare_index_query(#riak_kv_index_v3{term_regex=RE} = Q) when
@@ -2913,20 +2921,17 @@ filter_keys_test() ->
     riak_core_bg_manager:start(),
     {S, B, K} = backend_with_known_key(riak_kv_memory_backend),
     Caller1 = new_result_listener(keys),
-    handle_coverage(?KV_LISTKEYS_REQ{bucket=B,
-                                     item_filter=fun(_) -> true end}, [],
+    handle_coverage(riak_kv_requests:new_listkeys_request(B, fun(_) -> true end), [],
                     {fsm, {124, {0, node()}}, Caller1}, S),
     ?assertEqual({ok, [K]}, results_from_listener(Caller1)),
 
     Caller2 = new_result_listener(keys),
-    handle_coverage(?KV_LISTKEYS_REQ{bucket=B,
-                                     item_filter=fun(_) -> false end}, [],
+    handle_coverage(riak_kv_requests:new_listkeys_request(B, fun(_) -> false end), [],
                     {fsm, {125, {0, node()}}, Caller2}, S),
     ?assertEqual({ok, []}, results_from_listener(Caller2)),
 
     Caller3 = new_result_listener(keys),
-    handle_coverage(?KV_LISTKEYS_REQ{bucket= <<"g">>,
-                                     item_filter=fun(_) -> true end}, [],
+    handle_coverage(riak_kv_requests:new_listkeys_request(<<"g">>, fun(_) -> true end), [],
                     {fsm, {126, {0, node()}}, Caller3}, S),
     ?assertEqual({ok, []}, results_from_listener(Caller3)),
 
