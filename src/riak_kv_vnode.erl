@@ -944,14 +944,6 @@ handle_coverage(?KV_LISTBUCKETS_REQ{item_filter=ItemFilter},
             {noreply, State}
     end;
 
-handle_coverage(#riak_kv_listkeys_req_v3{bucket=Bucket,
-                                         item_filter=ItemFilter},
-                FilterVNodes, Sender, State) ->
-    %% v3 == no backpressure
-    ResultFun = result_fun(Bucket, Sender),
-    Opts = [{bucket, Bucket}],
-    handle_coverage_keyfold(Bucket, ItemFilter, ResultFun,
-                            FilterVNodes, Sender, Opts, State);
 handle_coverage(#riak_kv_index_req_v1{bucket=Bucket,
                               item_filter=ItemFilter,
                               qry=Query},
@@ -977,7 +969,10 @@ handle_coverage_request(kv_listkeys_request, Req, FilterVNodes, Sender, State) -
     %% v4 == ack-based backpressure
     Bucket = riak_kv_requests:get_bucket(Req),
     ItemFilter = riak_kv_requests:get_item_filter(Req),
-    ResultFun = result_fun_ack(Bucket, Sender),
+    ResultFun = case riak_kv_requests:get_ack_backpressure(Req) of
+                    true  -> result_fun_ack(Bucket, Sender);
+                    false -> result_fun(Bucket, Sender)
+                end,
     Opts = [{bucket, Bucket}],
     handle_coverage_keyfold(Bucket, ItemFilter, ResultFun,
                             FilterVNodes, Sender, Opts, State).
@@ -2921,17 +2916,17 @@ filter_keys_test() ->
     riak_core_bg_manager:start(),
     {S, B, K} = backend_with_known_key(riak_kv_memory_backend),
     Caller1 = new_result_listener(keys),
-    handle_coverage(riak_kv_requests:new_listkeys_request(B, fun(_) -> true end), [],
+    handle_coverage(riak_kv_requests:new_listkeys_request(B, fun(_) -> true end, true), [],
                     {fsm, {124, {0, node()}}, Caller1}, S),
     ?assertEqual({ok, [K]}, results_from_listener(Caller1)),
 
     Caller2 = new_result_listener(keys),
-    handle_coverage(riak_kv_requests:new_listkeys_request(B, fun(_) -> false end), [],
+    handle_coverage(riak_kv_requests:new_listkeys_request(B, fun(_) -> false end, true), [],
                     {fsm, {125, {0, node()}}, Caller2}, S),
     ?assertEqual({ok, []}, results_from_listener(Caller2)),
 
     Caller3 = new_result_listener(keys),
-    handle_coverage(riak_kv_requests:new_listkeys_request(<<"g">>, fun(_) -> true end), [],
+    handle_coverage(riak_kv_requests:new_listkeys_request(<<"g">>, fun(_) -> true end, true), [],
                     {fsm, {126, {0, node()}}, Caller3}, S),
     ?assertEqual({ok, []}, results_from_listener(Caller3)),
 
