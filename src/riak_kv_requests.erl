@@ -155,7 +155,7 @@ get_bucket(#riak_kv_listkeys_req_v4{bucket = Bucket}) ->
 get_item_filter(#riak_kv_listkeys_req_v4{item_filter = ItemFilter}) ->
     ItemFilter.
 
--spec get_ack_backpressure(request()) -> function().
+-spec get_ack_backpressure(request()) -> boolean().
 get_ack_backpressure(#riak_kv_listkeys_req_v4{ack_backpressure = AckBackpressure}) ->
     AckBackpressure.
 
