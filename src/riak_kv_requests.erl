@@ -142,6 +142,8 @@ new_listkeys_request(Bucket, ItemFilter, AckBackpressure) ->
 is_coordinated_put(#riak_kv_put_req_v1{options=Options}) ->
     proplists:get_value(coord, Options, false).
 
+get_bucket_key(#riak_kv_get_req_v1{bkey = BKey}) ->
+    BKey;
 get_bucket_key(#riak_kv_put_req_v1{bkey = BKey}) ->
     BKey;
 get_bucket_key(#riak_kv_w1c_put_req_v1{bkey = BKey}) ->
