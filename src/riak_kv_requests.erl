@@ -71,16 +71,19 @@
     % start_time :: non_neg_integer(), Jon to add?
 }).
 
-%% same as _v3, but triggers ack-based backpressure
+-record(riak_kv_listkeys_req_v3, {
+          bucket :: bucket(),
+          item_filter :: function()}).
+
+%% same as _v3, but triggers ack-based backpressure (we switch on the record *name*)
 -record(riak_kv_listkeys_req_v4, {
           bucket :: bucket(),
-          item_filter :: function(),
-          ack_backpressure :: boolean()}).
+          item_filter :: function()}).
 
 -opaque put_request() :: #riak_kv_put_req_v1{}.
 -opaque get_request() :: #riak_kv_get_req_v1{}.
 -opaque w1c_put_request() :: #riak_kv_w1c_put_req_v1{}.
--opaque listkeys_request() :: #riak_kv_listkeys_req_v4{}. %% | #riak_kv_listkeys_req_v3{}.
+-opaque listkeys_request() :: #riak_kv_listkeys_req_v4{} | #riak_kv_listkeys_req_v3{}.
 -type request() :: put_request()
                  | get_request()
                  | w1c_put_request()
@@ -132,11 +135,13 @@ new_get_request(BKey, ReqId) ->
 new_w1c_put_request(BKey, EncodedObj, ReplicaType) ->
     #riak_kv_w1c_put_req_v1{bkey = BKey, encoded_obj = EncodedObj, type = ReplicaType}.
 
--spec new_listkeys_request(bucket(), function(), boolean()) -> listkeys_request().
-new_listkeys_request(Bucket, ItemFilter, AckBackpressure) ->
+-spec new_listkeys_request(bucket(), function(), UseAckBackpressure::boolean()) -> listkeys_request().
+new_listkeys_request(Bucket, ItemFilter, true) ->
     #riak_kv_listkeys_req_v4{bucket=Bucket,
-                             item_filter=ItemFilter,
-                             ack_backpressure=AckBackpressure}.
+                             item_filter=ItemFilter};
+new_listkeys_request(Bucket, ItemFilter, false) ->
+    #riak_kv_listkeys_req_v3{bucket=Bucket,
+                             item_filter=ItemFilter}.
 
 -spec is_coordinated_put(put_request()) -> boolean().
 is_coordinated_put(#riak_kv_put_req_v1{options=Options}) ->
@@ -157,9 +162,11 @@ get_bucket(#riak_kv_listkeys_req_v4{bucket = Bucket}) ->
 get_item_filter(#riak_kv_listkeys_req_v4{item_filter = ItemFilter}) ->
     ItemFilter.
 
--spec get_ack_backpressure(request()) -> boolean().
-get_ack_backpressure(#riak_kv_listkeys_req_v4{ack_backpressure = AckBackpressure}) ->
-    AckBackpressure.
+-spec get_ack_backpressure(listkeys_request()) -> UseAckBackpressure::boolean().
+get_ack_backpressure(#riak_kv_listkeys_req_v3{}) ->
+    false;
+get_ack_backpressure(#riak_kv_listkeys_req_v4{}) ->
+    true.
 
 -spec get_encoded_obj(request()) -> encoded_obj().
 get_encoded_obj(#riak_kv_w1c_put_req_v1{encoded_obj = EncodedObj}) ->
