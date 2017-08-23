@@ -9,7 +9,8 @@
 
 -record(riak_kv_get_req_v1, {
           bkey :: {binary(), binary()},
-          req_id :: non_neg_integer()}).
+          req_id :: non_neg_integer(),
+          predicate :: function()}).
 
 -record(riak_kv_listkeys_req_v2, {
           bucket :: binary()|'_'|tuple(),

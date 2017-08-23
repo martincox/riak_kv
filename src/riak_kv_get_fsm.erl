@@ -47,7 +47,8 @@
                   details |
                   {sloppy_quorum, boolean()} | %% default = true
                   {n_val, pos_integer()} |     %% default = bucket props
-                  {crdt_op, true | undefined}. %% default = undefined
+                  {crdt_op, true | undefined}| %% default = undefined
+                  {predicate_get, false | fun()}.
 
 -type options() :: [option()].
 -type req_id() :: non_neg_integer().
@@ -295,7 +296,8 @@ validate_quorum(_R, _ROpt, _N, _PR, _PROpt, _NumPrimaries, _NumVnodes) ->
 %% @private
 execute(timeout, StateData0=#state{timeout=Timeout,req_id=ReqId,
                                    bkey=BKey, trace=Trace,
-                                   preflist2 = Preflist2}) ->
+                                   preflist2 = Preflist2,
+                                   options = Options}) ->
     TRef = schedule_timeout(Timeout),
     Preflist = [IndexNode || {IndexNode, _Type} <- Preflist2],
     case Trace of
@@ -306,7 +308,12 @@ execute(timeout, StateData0=#state{timeout=Timeout,req_id=ReqId,
         _ ->
             ok
     end,
-    riak_kv_vnode:get(Preflist, BKey, ReqId),
+    case get_option(predicate_get, Options) of
+        false ->
+            riak_kv_vnode:get(Preflist, BKey, ReqId);
+        Predicate ->
+            riak_kv_vnode:predicate_get(Preflist, BKey, ReqId, Predicate)
+    end,
     StateData = StateData0#state{tref=TRef},
     new_state(waiting_vnode_r, StateData).
 
@@ -322,7 +329,8 @@ preflist_for_tracing(Preflist) ->
 
 %% @private
 waiting_vnode_r({r, VnodeResult, Idx, _ReqId}, StateData = #state{get_core = GetCore,
-                                                                  trace=Trace}) ->
+                                                                  trace=Trace,
+                                                                  options=Options}) ->
     case Trace of
         true ->
             ShortCode = riak_kv_get_core:result_shortcode(VnodeResult),
@@ -337,7 +345,10 @@ waiting_vnode_r({r, VnodeResult, Idx, _ReqId}, StateData = #state{get_core = Get
             {Reply, UpdGetCore2} = riak_kv_get_core:response(UpdGetCore),
             NewStateData = client_reply(Reply, StateData#state{get_core = UpdGetCore2}),
             update_stats(Reply, NewStateData),
-            maybe_finalize(NewStateData);
+            case get_option(predicate_get, Options) of
+                false -> maybe_finalize(NewStateData);
+                _ -> ok
+            end;
         false ->
             %% don't use new_state/2 since we do timing per state, not per message in state
             {next_state, waiting_vnode_r,  StateData#state{get_core = UpdGetCore}}

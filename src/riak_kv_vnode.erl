@@ -28,6 +28,7 @@
          start_vnodes/1,
          get/3,
          get/4,
+         predicate_get/4,
          del/3,
          put/6,
          local_get/2,
@@ -210,6 +211,18 @@ get(Preflist, BKey, ReqId) ->
 get(Preflist, BKey, ReqId, Sender) ->
     Req = ?KV_GET_REQ{bkey=sanitize_bkey(BKey),
                       req_id=ReqId},
+    riak_core_vnode_master:command(Preflist,
+                                   Req,
+                                   Sender,
+                                   riak_kv_vnode_master).
+
+predicate_get(Preflist, BKey, ReqId, Predicate) ->
+    predicate_get(Preflist, BKey, ReqId, {fsm, undefined, self()}, Predicate).
+
+predicate_get(Preflist, BKey, ReqId, Sender, Predicate) ->
+    Req = ?KV_GET_REQ{bkey=sanitize_bkey(BKey),
+                      req_id=ReqId,
+                      predicate=Predicate},
     riak_core_vnode_master:command(Preflist,
                                    Req,
                                    Sender,
@@ -495,6 +508,9 @@ handle_command(?KV_PUT_REQ{bkey=BKey,
     update_vnode_stats(vnode_put, Idx, StartTS),
     {noreply, UpdState};
 
+handle_command(?KV_GET_REQ{bkey=BKey,req_id=ReqId,predicate=Predicate},
+               Sender,State) when is_function(Predicate) ->
+    do_predicate_get(Sender, BKey, ReqId, Predicate, State);
 handle_command(?KV_GET_REQ{bkey=BKey,req_id=ReqId},Sender,State) ->
     do_get(Sender, BKey, ReqId, State);
 handle_command(#riak_kv_listkeys_req_v2{bucket=Input, req_id=ReqId, caller=Caller}, _Sender,
@@ -1582,6 +1598,19 @@ do_get(_Sender, BKey, ReqID,
     end,
     update_vnode_stats(vnode_get, Idx, StartTS),
     {reply, {r, Retval, Idx, ReqID}, State#state{modstate=ModState1}}.
+
+%% @private
+do_predicate_get(_Sender, BKey, ReqID, Predicate,
+       State=#state{idx=Idx, mod=Mod, modstate=ModState}) ->
+    StartTS = os:timestamp(),
+    {Retval, ModState1} = do_get_term(BKey, Mod, ModState),
+    Retval1 =
+        case Predicate(Retval) of
+            error -> Retval;
+            PredicateObj -> {ok, PredicateObj}
+        end,
+    update_vnode_stats(vnode_get, Idx, StartTS),
+    {reply, {r, Retval1, Idx, ReqID}, State#state{modstate=ModState1}}.
 
 %% @private
 -spec do_get_term({binary(), binary()}, atom(), tuple()) ->
