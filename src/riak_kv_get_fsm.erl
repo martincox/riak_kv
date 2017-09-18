@@ -47,7 +47,8 @@
                   details |
                   {sloppy_quorum, boolean()} | %% default = true
                   {n_val, pos_integer()} |     %% default = bucket props
-                  {crdt_op, true | undefined}. %% default = undefined
+                  {crdt_op, true | undefined}| %% default = undefined
+                  {eco_get, false}.
 
 -type options() :: [option()].
 -type req_id() :: non_neg_integer().
@@ -74,7 +75,11 @@
                 timing = [] :: [{atom(), erlang:timestamp()}],
                 calculated_timings :: {ResponseUSecs::non_neg_integer(),
                                        [{StateName::atom(), TimeUSecs::non_neg_integer()}]} | undefined,
-                crdt_op :: undefined | true
+                crdt_op :: undefined | true,
+                coord_pl_entry :: {integer(), atom()},
+                bad_coordinators = [] :: [atom()],
+                coordinator_timeout :: integer(),
+                eco_get :: boolean()
                }).
 
 -include("riak_kv_dtrace.hrl").
@@ -123,6 +128,54 @@ start_link(From, Bucket, Key, GetOptions) ->
             end
     end.
 
+set_get_coordinator_failure_timeout(MS) when is_integer(MS), MS >= 0 ->
+    application:set_env(riak_kv, get_coordinator_failure_timeout, MS);
+set_get_coordinator_failure_timeout(Bad) ->
+    lager:error("~s:set_get_coordinator_failure_timeout(~p) invalid",
+                [?MODULE, Bad]),
+    set_get_coordinator_failure_timeout(3000).
+
+get_get_coordinator_failure_timeout() ->
+    app_helper:get_env(riak_kv, get_coordinator_failure_timeout, 3000).
+
+make_ack_options(Options) ->
+    case (riak_core_capability:get(
+            {riak_kv, get_fsm_ack_execute}, disabled) == disabled
+          orelse not
+          app_helper:get_env(
+            riak_kv, retry_get_coordinator_failure, true)) of
+        true ->
+            {false, Options};
+        false ->
+            case get_option(retry_get_coordinator_failure, Options, true) of
+                true ->
+                    {true, [{ack_execute, self()}|Options]};
+                _Else ->
+                    {false, Options}
+            end
+    end.
+
+spawn_coordinator_proc(CoordNode, Mod, Fun, Args) ->
+    %% If the net_kernel cannot talk to CoordNode, then any variation
+    %% of the spawn BIF will block.  The whole point of picking a new
+    %% coordinator node is being able to pick a new coordinator node
+    %% and try it ... without blocking for dozens of seconds.
+    spawn(fun() ->
+                  proc_lib:spawn(CoordNode, Mod, Fun, Args)
+          end).
+
+monitor_remote_coordinator(false = _UseAckP, _MiddleMan, _CoordNode, StateData) ->
+    {stop, normal, StateData};
+monitor_remote_coordinator(true = _UseAckP, MiddleMan, CoordNode, StateData) ->
+    receive
+        {ack, CoordNode, now_executing} ->
+            {stop, normal, StateData}
+    after StateData#state.coordinator_timeout ->
+            exit(MiddleMan, kill),
+            Bad = StateData#state.bad_coordinators,
+            prepare(timeout, StateData#state{bad_coordinators=[CoordNode|Bad]})
+    end.
+
 %% ===================================================================
 %% Test API
 %% ===================================================================
@@ -150,11 +203,13 @@ test_link(From, Bucket, Key, GetOptions, StateProps) ->
 init([From, Bucket, Key, Options0, Monitor]) ->
     StartNow = os:timestamp(),
     Options = proplists:unfold(Options0),
+    CoordTimeout = get_get_coordinator_failure_timeout(),
     StateData = #state{from = From,
                        options = Options,
                        bkey = {Bucket, Key},
                        timing = riak_kv_fsm_timing:add_timing(prepare, []),
-                       startnow = StartNow},
+                       startnow = StartNow,
+                       coordinator_timeout=CoordTimeout},
     (Monitor =:= true) andalso riak_kv_get_put_monitor:get_fsm_spawned(self()),
     Trace = app_helper:get_env(riak_kv, fsm_trace_enabled),
     case Trace of 
@@ -180,9 +235,11 @@ init({test, Args, StateProps}) ->
     {ok, validate, TestStateData, 0}.
 
 %% @private
-prepare(timeout, StateData=#state{bkey=BKey={Bucket,_Key},
+prepare(timeout, StateData=#state{from = From,
+                                  bkey=BKey={Bucket,_Key},
                                   options=Options,
-                                  trace=Trace}) ->
+                                  trace=Trace,
+                                  bad_coordinators = BadCoordinators}) ->
     ?DTRACE(Trace, ?C_GET_FSM_PREPARE, [], ["prepare"]),
     {ok, DefaultProps} = application:get_env(riak_core, 
                                              default_bucket_props),
@@ -222,12 +279,59 @@ prepare(timeout, StateData=#state{bkey=BKey={Bucket,_Key},
                         UpNodes = riak_core_node_watcher:nodes(riak_kv),
                         riak_core_apl:get_apl_ann(DocIdx, N, UpNodes)
                 end,
-            new_state_timeout(validate, StateData#state{starttime=riak_core_util:moment(),
+            LocalPL = [IndexNode || {{_Index, Node} = IndexNode, _Type} <-
+                Preflist2, Node == node()],
+            Eco = (get_option(eco_get, Options, false) /= true),
+            case {Preflist2, LocalPL =:= [] andalso Eco == true} of
+                {[], _} ->
+                    %% Empty preflist
+                    ?DTRACE(Trace, ?C_GET_FSM_PREPARE, [-1], 
+                            ["prepare",<<"all nodes down">>]),
+                    client_reply({error, all_nodes_down}, StateData);
+                {_, true} ->
+                    %% This node is not in the preference list
+                    %% forward on to a random node
+                    {ListPos, _} = random:uniform_s(length(Preflist2), os:timestamp()),
+                    {{_Idx, CoordNode},_Type} = lists:nth(ListPos, Preflist2),
+                    ?DTRACE(Trace, ?C_PUT_FSM_PREPARE, [1],
+                            ["prepare", atom2list(CoordNode)]),
+                    try
+                        {UseAckP, Options2} = make_ack_options(
+                                               [{ack_execute, self()}|Options]),
+                        {Bucket, Key} = BKey,
+                        MiddleMan = spawn_coordinator_proc(
+                                      CoordNode, riak_kv_put_fsm, start_link,
+                                      [From, Bucket, Key, Options2]),
+                        ?DTRACE(Trace, ?C_GET_FSM_PREPARE, [2],
+                                ["prepare", atom2list(CoordNode)]),
+                        ok = riak_kv_stat:update(coord_redir),
+                        monitor_remote_coordinator(UseAckP, MiddleMan,
+                                                   CoordNode, StateData)
+                    catch
+                        _:Reason ->
+                            ?DTRACE(Trace, ?C_GET_FSM_PREPARE, [-2],
+                                    ["prepare", dtrace_errstr(Reason)]),
+                            lager:error("Unable to forward get for ~p to ~p - ~p @ ~p\n",
+                                        [BKey, CoordNode, Reason, erlang:get_stacktrace()]),
+                            client_reply({error, {coord_handoff_failed, Reason}}, StateData)
+                    end;
+                _ ->
+                    CoordPLEntry = case Eco of
+                                    true ->
+                                        hd(LocalPL);
+                                    _ ->
+                                        undefined
+                                end,
+                    %% Putting asis, no need to handle locally on a node in the
+                    %% preflist, can coordinate from anywhere
+                    new_state_timeout(validate, StateData#state{starttime=riak_core_util:moment(),
                                                 n = N,
                                                 bucket_props=Props,
+                                                coord_pl_entry = CoordPLEntry,
                                                 preflist2 = Preflist2,
                                                 tracked_bucket = StatTracked,
                                                 crdt_op = CrdtOp})
+                end
     end.
 
 %% @private
@@ -293,11 +397,19 @@ validate_quorum(_R, _ROpt, _N, _PR, _PROpt, _NumPrimaries, _NumVnodes) ->
     ok.
 
 %% @private
-execute(timeout, StateData0=#state{timeout=Timeout,req_id=ReqId,
-                                   bkey=BKey, trace=Trace,
-                                   preflist2 = Preflist2}) ->
+execute(timeout, State=#state{options = Options, coord_pl_entry = CPL, 
+        timeout = Timeout, trace = Trace, preflist2 = Preflist2}) ->
+    %% If we are a forwarded coordinator, the originating node is expecting
+    %% an ack from us.
+    case get_option(ack_execute, Options) of
+        undefined ->
+            ok;
+        Pid ->
+            Pid ! {ack, node(), now_executing}
+    end,
     TRef = schedule_timeout(Timeout),
     Preflist = [IndexNode || {IndexNode, _Type} <- Preflist2],
+    State1 = State#state{tref=TRef},
     case Trace of
         true ->
             ?DTRACE(?C_GET_FSM_EXECUTE, [], ["execute"]),
@@ -306,9 +418,12 @@ execute(timeout, StateData0=#state{timeout=Timeout,req_id=ReqId,
         _ ->
             ok
     end,
-    riak_kv_vnode:get(Preflist, BKey, ReqId),
-    StateData = StateData0#state{tref=TRef},
-    new_state(waiting_vnode_r, StateData).
+    case CPL of
+        undefined ->
+            execute_remote(State1);
+        _ ->
+            execute_local(State1)
+    end.
 
 %% @private calculate a concatenated preflist for tracing macro
 preflist_for_tracing(Preflist) ->
@@ -320,6 +435,60 @@ preflist_for_tracing(Preflist) ->
              <<>>                          % eunit test
      end || {Idx, Nd} <- lists:sublist(Preflist, 4)].
 
+%% @private
+%% Send the put coordinating put requests to the local vnode - the returned object
+%% will guarantee a frontier object.
+%% N.B. Not actually a state - here in the source to make reading the flow easier
+execute_local(StateData=#state{req_id = ReqId,
+                               timeout=Timeout, bkey=BKey,
+                               coord_pl_entry = {_Index, Node} = CoordPLEntry,
+                               trace = Trace,
+                               starttime = StartTime}) ->
+    StateData1 = 
+        case Trace of 
+            true ->
+                ?DTRACE(?C_PUT_FSM_EXECUTE_LOCAL, [], [atom2list(Node)]),
+                add_timing(execute_local, StateData);
+            _ ->
+                StateData
+        end,
+    TRef = schedule_timeout(Timeout),
+    riak_kv_vnode:coord_get(CoordPLEntry, BKey, ReqId),
+    StateData2 = StateData1#state{tref = TRef},
+    %% Must always wait for local vnode - it contains the object with updated vclock
+    %% to use for the remotes. (Ignore optimization for N=1 case for now).
+    new_state(waiting_local_vnode, StateData2).
+
+%% @private
+waiting_local_vnode(request_timeout, StateData=#state{trace = Trace}) ->
+    ?DTRACE(Trace, ?C_PUT_FSM_WAITING_LOCAL_VNODE, [-1], []),
+    client_reply({error,timeout}, StateData);
+waiting_local_vnode(Result, StateData = #state{get_core = GetCore,
+                                               trace = Trace}) ->
+    UpdGetCore1 = riak_kv_get_core:add_result(Result, GetCore),
+    case Result of
+        {fail, Idx, Reason} ->
+            ?DTRACE(Trace, ?C_PUT_FSM_WAITING_LOCAL_VNODE, [-1],
+                    [integer_to_list(Idx)]),
+            %% Local vnode failure is enough to sink whole operation
+            client_reply({error, Reason}, StateData#state{get_core = UpdGetCore1});
+        {w, Idx, _ReqId} ->
+            ?DTRACE(Trace, ?C_PUT_FSM_WAITING_LOCAL_VNODE, [1],
+                    [integer_to_list(Idx)]),
+            {next_state, waiting_local_vnode, StateData#state{get_core = UpdGetCore1}};
+        {dw, Idx, PutObj, _ReqId} ->
+            %% Either returnbody is true or coord put merged with the existing
+            %% object and bumped the vclock.  Either way use the returned
+            %% object for the remote vnode
+            ?DTRACE(Trace, ?C_PUT_FSM_WAITING_LOCAL_VNODE, [2],
+                    [integer_to_list(Idx)]),
+            execute_remote(StateData#state{robj = PutObj, putcore = UpdPutCore1});
+        {dw, Idx, _ReqId} ->
+            %% Write succeeded without changes to vclock required and returnbody false
+            ?DTRACE(Trace, ?C_PUT_FSM_WAITING_LOCAL_VNODE, [2],
+                    [integer_to_list(Idx)]),
+            execute_remote(StateData#state{putcore = UpdPutCore1})
+    end.
 %% @private
 waiting_vnode_r({r, VnodeResult, Idx, _ReqId}, StateData = #state{get_core = GetCore,
                                                                   trace=Trace}) ->
@@ -348,6 +517,61 @@ waiting_vnode_r(request_timeout, StateData = #state{trace=Trace}) ->
     S2 = client_reply({error,timeout}, StateData),
     update_stats(timeout, S2),
     finalize(S2).
+
+%% @private
+%% Send the put requests to any remote nodes if necessary and decided if
+%% enough responses have been received yet (i.e. if W/DW=1)
+%% N.B. Not actually a state - here in the source to make reading the flow easier
+execute_remote(StateData=#state{req_id = ReqId,
+                                preflist2 = Preflist2, bkey = BKey,
+                                coord_pl_entry = CoordPLEntry,
+                                get_core = GetCore,
+                                trace = Trace,
+                                starttime = StartTime}) ->
+    Preflist = [IndexNode || {IndexNode, _Type} <- Preflist2,
+                             IndexNode /= CoordPLEntry],
+    StateData1 = 
+        case Trace of
+            true ->
+                Ps = [[atom2list(Nd), $,, integer_to_list(Idx)] ||
+                         {Idx, Nd} <- lists:sublist(Preflist, 4)],
+                ?DTRACE(?C_PUT_FSM_EXECUTE_REMOTE, [], [Ps]),
+                add_timing(execute_remote, StateData);
+            _ ->
+                StateData
+        end,
+    riak_kv_vnode:get(Preflist, BKey, ReqId),
+    case riak_kv_get_core:enough(GetCore) of
+        true ->
+            {Reply, UpdGetCore} = riak_kv_get_core:response(GetCore),
+            client_reply(Reply, StateData1#state{get_core = UpdGetCore});
+        false ->
+            new_state(waiting_remote_vnode, StateData1)
+    end.
+
+
+%% @private
+waiting_remote_vnode(request_timeout, StateData=#state{trace = Trace}) ->
+    ?DTRACE(Trace, ?C_PUT_FSM_WAITING_REMOTE_VNODE, [-1], []),
+    client_reply({error,timeout}, StateData);
+waiting_remote_vnode(Result, StateData = #state{get_core = GetCore,
+                                                trace = Trace}) ->
+    case Trace of
+        true ->
+            ShortCode = riak_kv_put_core:result_shortcode(Result),
+            IdxStr = integer_to_list(riak_kv_put_core:result_idx(Result)),
+            ?DTRACE(?C_PUT_FSM_WAITING_REMOTE_VNODE, [ShortCode], [IdxStr]);
+        _ ->
+            ok
+    end,
+    UpdGetCore1 = riak_kv_get_core:add_result(Result, GetCore),
+    case riak_kv_get_core:enough(UpdGetCore1) of
+        true ->
+            {Reply, UpdGetCore2} = riak_kv_get_core:response(UpdGetCore1),
+            client_reply(Reply, StateData#state{get_core = UpdGetCore2});
+        false ->
+            {next_state, waiting_remote_vnode, StateData#state{get_core = UpdGetCore1}}
+    end.
 
 %% @private
 waiting_read_repair({r, VnodeResult, Idx, _ReqId},
@@ -615,6 +839,14 @@ add_timing(Stage, State = #state{timing = Timing}) ->
 details() ->
     [timing,
      vnodes].
+
+atom2list(A) when is_atom(A) ->
+    atom_to_list(A);
+atom2list(P) when is_pid(P)->
+    pid_to_list(P).                             % eunit tests
+
+dtrace_errstr(Term) ->
+    io_lib:format("~P", [Term, 12]).
 
 -ifdef(TEST).
 -define(expect_msg(Exp,Timeout),
