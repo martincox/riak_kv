@@ -28,9 +28,12 @@
 -export([test_link/7, test_link/5]).
 -endif.
 -export([start/6, start_link/6, start_link/4]).
+-export([set_get_coordinator_failure_timeout/1,
+         get_get_coordinator_failure_timeout/0]).
 -export([init/1, handle_event/3, handle_sync_event/4,
          handle_info/3, terminate/3, code_change/4]).
--export([prepare/2,validate/2,execute/2,waiting_vnode_r/2,waiting_read_repair/2]).
+-export([prepare/2,validate/2,execute/2,waiting_vnode_r/2,
+        waiting_local_vnode/2,waiting_read_repair/2]).
 
 -type detail() :: timing |
                   vnodes.
@@ -238,8 +241,7 @@ init({test, Args, StateProps}) ->
 prepare(timeout, StateData=#state{from = From,
                                   bkey=BKey={Bucket,_Key},
                                   options=Options,
-                                  trace=Trace,
-                                  bad_coordinators = BadCoordinators}) ->
+                                  trace=Trace}) ->
     ?DTRACE(Trace, ?C_GET_FSM_PREPARE, [], ["prepare"]),
     {ok, DefaultProps} = application:get_env(riak_core, 
                                              default_bucket_props),
@@ -442,8 +444,7 @@ preflist_for_tracing(Preflist) ->
 execute_local(StateData=#state{req_id = ReqId,
                                timeout=Timeout, bkey=BKey,
                                coord_pl_entry = {_Index, Node} = CoordPLEntry,
-                               trace = Trace,
-                               starttime = StartTime}) ->
+                               trace = Trace}) ->
     StateData1 = 
         case Trace of 
             true ->
@@ -453,7 +454,7 @@ execute_local(StateData=#state{req_id = ReqId,
                 StateData
         end,
     TRef = schedule_timeout(Timeout),
-    riak_kv_vnode:coord_get(CoordPLEntry, BKey, ReqId),
+    riak_kv_vnode:get(CoordPLEntry, BKey, ReqId),
     StateData2 = StateData1#state{tref = TRef},
     %% Must always wait for local vnode - it contains the object with updated vclock
     %% to use for the remotes. (Ignore optimization for N=1 case for now).
@@ -463,32 +464,38 @@ execute_local(StateData=#state{req_id = ReqId,
 waiting_local_vnode(request_timeout, StateData=#state{trace = Trace}) ->
     ?DTRACE(Trace, ?C_PUT_FSM_WAITING_LOCAL_VNODE, [-1], []),
     client_reply({error,timeout}, StateData);
-waiting_local_vnode(Result, StateData = #state{get_core = GetCore,
-                                               trace = Trace}) ->
-    UpdGetCore1 = riak_kv_get_core:add_result(Result, GetCore),
-    case Result of
-        {fail, Idx, Reason} ->
-            ?DTRACE(Trace, ?C_PUT_FSM_WAITING_LOCAL_VNODE, [-1],
-                    [integer_to_list(Idx)]),
-            %% Local vnode failure is enough to sink whole operation
-            client_reply({error, Reason}, StateData#state{get_core = UpdGetCore1});
-        {w, Idx, _ReqId} ->
-            ?DTRACE(Trace, ?C_PUT_FSM_WAITING_LOCAL_VNODE, [1],
-                    [integer_to_list(Idx)]),
-            {next_state, waiting_local_vnode, StateData#state{get_core = UpdGetCore1}};
-        {dw, Idx, PutObj, _ReqId} ->
-            %% Either returnbody is true or coord put merged with the existing
-            %% object and bumped the vclock.  Either way use the returned
-            %% object for the remote vnode
-            ?DTRACE(Trace, ?C_PUT_FSM_WAITING_LOCAL_VNODE, [2],
-                    [integer_to_list(Idx)]),
-            execute_remote(StateData#state{robj = PutObj, putcore = UpdPutCore1});
-        {dw, Idx, _ReqId} ->
-            %% Write succeeded without changes to vclock required and returnbody false
-            ?DTRACE(Trace, ?C_PUT_FSM_WAITING_LOCAL_VNODE, [2],
-                    [integer_to_list(Idx)]),
-            execute_remote(StateData#state{putcore = UpdPutCore1})
+waiting_local_vnode({r, VnodeResult, Idx, _ReqId}, StateData = #state{get_core =
+        GetCore, trace = _Trace}) ->
+    UpdGetCore = riak_kv_get_core:add_result(Idx,VnodeResult, GetCore),
+    execute_remote(StateData#state{get_core = UpdGetCore}).
+
+%% @private
+execute_remote(StateData=#state{req_id = ReqId,
+                                preflist2 = Preflist2, bkey = BKey,
+                                coord_pl_entry = CoordPLEntry,
+                                get_core = GetCore,
+                                trace = Trace}) ->
+    Preflist = [IndexNode || {IndexNode, _Type} <- Preflist2,
+                             IndexNode /= CoordPLEntry],
+    StateData1 = 
+        case Trace of
+            true ->
+                Ps = [[atom2list(Nd), $,, integer_to_list(Idx)] ||
+                         {Idx, Nd} <- lists:sublist(Preflist, 4)],
+                ?DTRACE(?C_PUT_FSM_EXECUTE_REMOTE, [], [Ps]),
+                add_timing(execute_remote, StateData);
+            _ ->
+                StateData
+        end,
+    riak_kv_vnode:get(Preflist, BKey, ReqId),
+    case riak_kv_get_core:enough(GetCore) of
+        true ->
+            {Reply, UpdGetCore} = riak_kv_get_core:response(GetCore),
+            client_reply(Reply, StateData1#state{get_core = UpdGetCore});
+        false ->
+            new_state(waiting_vnode_r, StateData1)
     end.
+
 %% @private
 waiting_vnode_r({r, VnodeResult, Idx, _ReqId}, StateData = #state{get_core = GetCore,
                                                                   trace=Trace}) ->
@@ -517,61 +524,6 @@ waiting_vnode_r(request_timeout, StateData = #state{trace=Trace}) ->
     S2 = client_reply({error,timeout}, StateData),
     update_stats(timeout, S2),
     finalize(S2).
-
-%% @private
-%% Send the put requests to any remote nodes if necessary and decided if
-%% enough responses have been received yet (i.e. if W/DW=1)
-%% N.B. Not actually a state - here in the source to make reading the flow easier
-execute_remote(StateData=#state{req_id = ReqId,
-                                preflist2 = Preflist2, bkey = BKey,
-                                coord_pl_entry = CoordPLEntry,
-                                get_core = GetCore,
-                                trace = Trace,
-                                starttime = StartTime}) ->
-    Preflist = [IndexNode || {IndexNode, _Type} <- Preflist2,
-                             IndexNode /= CoordPLEntry],
-    StateData1 = 
-        case Trace of
-            true ->
-                Ps = [[atom2list(Nd), $,, integer_to_list(Idx)] ||
-                         {Idx, Nd} <- lists:sublist(Preflist, 4)],
-                ?DTRACE(?C_PUT_FSM_EXECUTE_REMOTE, [], [Ps]),
-                add_timing(execute_remote, StateData);
-            _ ->
-                StateData
-        end,
-    riak_kv_vnode:get(Preflist, BKey, ReqId),
-    case riak_kv_get_core:enough(GetCore) of
-        true ->
-            {Reply, UpdGetCore} = riak_kv_get_core:response(GetCore),
-            client_reply(Reply, StateData1#state{get_core = UpdGetCore});
-        false ->
-            new_state(waiting_remote_vnode, StateData1)
-    end.
-
-
-%% @private
-waiting_remote_vnode(request_timeout, StateData=#state{trace = Trace}) ->
-    ?DTRACE(Trace, ?C_PUT_FSM_WAITING_REMOTE_VNODE, [-1], []),
-    client_reply({error,timeout}, StateData);
-waiting_remote_vnode(Result, StateData = #state{get_core = GetCore,
-                                                trace = Trace}) ->
-    case Trace of
-        true ->
-            ShortCode = riak_kv_put_core:result_shortcode(Result),
-            IdxStr = integer_to_list(riak_kv_put_core:result_idx(Result)),
-            ?DTRACE(?C_PUT_FSM_WAITING_REMOTE_VNODE, [ShortCode], [IdxStr]);
-        _ ->
-            ok
-    end,
-    UpdGetCore1 = riak_kv_get_core:add_result(Result, GetCore),
-    case riak_kv_get_core:enough(UpdGetCore1) of
-        true ->
-            {Reply, UpdGetCore2} = riak_kv_get_core:response(UpdGetCore1),
-            client_reply(Reply, StateData#state{get_core = UpdGetCore2});
-        false ->
-            {next_state, waiting_remote_vnode, StateData#state{get_core = UpdGetCore1}}
-    end.
 
 %% @private
 waiting_read_repair({r, VnodeResult, Idx, _ReqId},

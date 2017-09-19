@@ -25,7 +25,7 @@
 -module(riak_client).
 
 -export([new/2]).
--export([get/3,get/4,get/5]).
+-export([get/3,get/4,get/5,eco_get/3]).
 -export([put/2,put/3,put/4,put/5,put/6]).
 -export([delete/3,delete/4,delete/5]).
 -export([delete_vclock/4,delete_vclock/5,delete_vclock/6]).
@@ -79,6 +79,9 @@ new(Node, ClientId) ->
 %% @equiv get(Bucket, Key, R, default_timeout())
 get(Bucket, Key, {?MODULE, [_Node, _ClientId]}=THIS) ->
     get(Bucket, Key, [], THIS).
+
+eco_get(Bucket, Key, {?MODULE, [_Node, _ClientId]}=THIS) ->
+    get(Bucket, Key, [{eco_get, true}], THIS).
 
 normal_get(Bucket, Key, Options, {?MODULE, [Node, _ClientId]}) ->
     Me = self(),

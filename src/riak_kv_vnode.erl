@@ -28,6 +28,8 @@
          start_vnodes/1,
          get/3,
          get/4,
+         eco_get/4,
+         eco_get/5,
          del/3,
          put/6,
          local_get/2,
@@ -199,9 +201,22 @@ get(Preflist, BKey, ReqId) ->
     %% so self() == FSM pid
     get(Preflist, BKey, ReqId, {fsm, undefined, self()}).
 
+eco_get(Preflist, BKey, ReqId, Vclock) ->
+    %% Assuming this function is called from a FSM process
+    %% so self() == FSM pid
+    eco_get(Preflist, BKey, ReqId, Vclock, {fsm, undefined, self()}).
+
 get(Preflist, BKey, ReqId, Sender) ->
     Req = ?KV_GET_REQ{bkey=sanitize_bkey(BKey),
                       req_id=ReqId},
+    riak_core_vnode_master:command(Preflist,
+                                   Req,
+                                   Sender,
+                                   riak_kv_vnode_master).
+
+eco_get(Preflist, BKey, ReqId, Vclock, Sender) ->
+    Req = ?KV_GET_REQ_ECO{bkey=sanitize_bkey(BKey),
+                      req_id=ReqId, vclock = Vclock},
     riak_core_vnode_master:command(Preflist,
                                    Req,
                                    Sender,
@@ -489,6 +504,8 @@ handle_command(?KV_PUT_REQ{bkey=BKey,
 
 handle_command(?KV_GET_REQ{bkey=BKey,req_id=ReqId},Sender,State) ->
     do_get(Sender, BKey, ReqId, State);
+handle_command(?KV_GET_REQ_ECO{bkey=BKey,req_id=ReqId,vclock=Vclock},Sender,State) ->
+    do_get(Sender, BKey, ReqId, Vclock, State);
 handle_command(#riak_kv_listkeys_req_v2{bucket=Input, req_id=ReqId, caller=Caller}, _Sender,
                State=#state{async_folding=AsyncFolding,
                             key_buf_size=BufferSize,
@@ -1553,6 +1570,20 @@ do_get(_Sender, BKey, ReqID,
     end,
     update_vnode_stats(vnode_get, Idx, StartTS),
     {reply, {r, Retval, Idx, ReqID}, State#state{modstate=ModState1}}.
+
+%% @private
+do_get(_Sender, BKey, ReqID, Vclock,
+       State=#state{idx=Idx, mod=Mod, modstate=ModState}) ->
+    StartTS = os:timestamp(),
+    {Retval, ModState1} = do_get_term(BKey, Mod, ModState),
+    {ok, Obj} = Retval,
+    Response = 
+        case vclock:equal(Vclock, riak_object:vclock(Obj)) of
+            true -> ok;
+            false -> Retval
+        end,
+    update_vnode_stats(vnode_get, Idx, StartTS),
+    {reply, {r, Response, Idx, ReqID}, State#state{modstate=ModState1}}.
 
 %% @private
 -spec do_get_term({binary(), binary()}, atom(), tuple()) ->
