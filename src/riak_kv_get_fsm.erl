@@ -28,28 +28,36 @@
 -export([test_link/7, test_link/5]).
 -endif.
 -export([start/6, start_link/6, start/4, start_link/4]).
--export([get_get_coordinator_timeout/0]).
 -export([init/1, handle_event/3, handle_sync_event/4,
          handle_info/3, terminate/3, code_change/4]).
--export([prepare/2,validate/2,execute/2,waiting_vnode_r/2,waiting_read_repair/2]).
+-export([prepare/2,validate/2,execute/2,waiting_local_vnode/2,waiting_vnode_r/2,waiting_read_repair/2]).
 
 -type detail() :: timing |
                   vnodes.
 -type details() :: [detail()].
 
--type option() :: {r, pos_integer()} |                  %% Minimum number of successful responses
-                  {pr, non_neg_integer()} |             %% Minimum number of primary vnodes participating
-                  {basic_quorum, boolean()} |           %% Whether to use basic quorum (return early
-                                                        %% in some failure cases.
-                  {notfound_ok, boolean()}  |           %% Count notfound reponses as successful.
-                  {timeout, pos_integer() | infinity} | %% Timeout for vnode responses
-                  {details, details()} |                %% Return extra details as a 3rd element
-                  {details, true} |
-                  details |
-                  {sloppy_quorum, boolean()} |          %% default = true
-                  {n_val, pos_integer()} |              %% default = bucket props
-                  {crdt_op, true | undefined} |         %% default = undefined
-				  {eco_get, false}.					%% Force preflist node to handle request.
+-type option() :: 
+		%% Minimum number of successful responses
+		{r, pos_integer()} |
+		%% Minimum number of primary vnodes participating
+        {pr, non_neg_integer()} |             
+		%% Whether to use basic quorum (return early in some failure cases.
+        {basic_quorum, boolean()} |
+		%% Count notfound reponses as successful.
+        {notfound_ok, boolean()}  |
+		%% Timeout for vnode responses
+        {timeout, pos_integer() | infinity} |
+		%% Return extra details as a 3rd element
+        {details, details()} |                
+        {details, true} | details |
+		%% default = true
+        {sloppy_quorum, boolean()} |          
+		%% default = bucket props
+        {n_val, pos_integer()} |              
+		%% default = undefined
+        {crdt_op, true | undefined} |         
+		%% Force preflist node to handle request.
+		{eco_get, false}.					
 
 -type options() :: [option()].
 -type req_id() :: non_neg_integer().
@@ -76,7 +84,11 @@
                 timing = [] :: [{atom(), erlang:timestamp()}],
                 calculated_timings :: {ResponseUSecs::non_neg_integer(),
                                        [{StateName::atom(), TimeUSecs::non_neg_integer()}]} | undefined,
-                crdt_op :: undefined | true
+                crdt_op :: undefined | true,
+				robj :: riak_object:riak_object(),
+				coord_pl_entry :: {integer(), atom()},
+				bad_coordinators :: [],
+				coordinator_timeout :: integer()
                }).
 
 -include("riak_kv_dtrace.hrl").
@@ -127,15 +139,14 @@ get_get_coordinator_failure_timeout() ->
     app_helper:get_env(riak_kv, get_coordinator_failure_timeout, 3000).
 
 make_ack_options(Options) ->
-    case (riak_core_capability:get(
-            {riak_kv, get_fsm_ack_execute}, disabled) == disabled
-          orelse not
-          app_helper:get_env(
-            riak_kv, retry_get_coordinator_failure, true)) of
+	Ack = riak_core_capability:get({riak_kv, get_fsm_ack_execute}, disabled),
+	Retry = app_helper:get_env(riak_kv, retry_get_coordinator_failure, true),
+	case (Ack == disabled orelse not Retry) of
         true ->
             {false, Options};
         false ->
-            case get_option(retry_get_coordinator_failure, Options, true) of
+			Retry = get_option(retry_get_coordinator_failure, Options, true),
+            case Retry of
                 true ->
                     {true, [{ack_execute, self()}|Options]};
                 _Else ->
@@ -225,6 +236,7 @@ init({test, Args, StateProps}) ->
 prepare(timeout, StateData=#state{bkey=BKey={Bucket,_Key},
                                   options=Options,
                                   trace=Trace,
+								  from=From,
 								  bad_coordinators=BadCoordinators}) ->
     ?DTRACE(Trace, ?C_GET_FSM_PREPARE, [], ["prepare"]),
     {ok, DefaultProps} = application:get_env(riak_core, 
@@ -264,10 +276,9 @@ prepare(timeout, StateData=#state{bkey=BKey={Bucket,_Key},
                         riak_core_apl:get_apl_ann(DocIdx, N, 
 												  UpNodes -- BadCoordinators);
                     false ->
-						Preflist1 = riak_core_apl:get_primary_apl(DocIdx. N, riak_kv),
+						Preflist1 = riak_core_apl:get_primary_apl(DocIdx, N, riak_kv),
                         [X || X = {{_Index, Node}, _Type} <- Preflist1,
                               not lists:member(Node, BadCoordinators)]
-
                 end,
             %% Check if this node is in the preference list so it can coordinate
             LocalPL = [IndexNode || {{_Index, Node} = IndexNode, _Type} <- Preflist2,
@@ -278,7 +289,7 @@ prepare(timeout, StateData=#state{bkey=BKey={Bucket,_Key},
                     %% Empty preflist
                     ?DTRACE(Trace, ?C_PUT_FSM_PREPARE, [-1], 
                             ["prepare",<<"all nodes down">>]),
-                    process_reply({error, all_nodes_down}, StateData0);
+                    client_reply({error, all_nodes_down}, StateData);
                 {_, true} ->
                     %% This node is not in the preference list
                     %% forward on to a random node
@@ -291,24 +302,24 @@ prepare(timeout, StateData=#state{bkey=BKey={Bucket,_Key},
                                                [{ack_execute, self()}|Options]),
                         MiddleMan = spawn_coordinator_proc(
                                       CoordNode, riak_kv_get_fsm, start_link,
-                                      [From,RObj,Options2]),
-                        ?DTRACE(Trace, ?C_PUT_GET_PREPARE, [2],
+                                      [From,BKey,Options2]),
+                        ?DTRACE(Trace, ?C_GET_FSM_PREPARE, [2],
                                 ["prepare", atom2list(CoordNode)]),
                         ok = riak_kv_stat:update(coord_redir),
                         monitor_remote_coordinator(UseAckP, MiddleMan,
-                                                   CoordNode, StateData0)
+                                                   CoordNode, StateData)
                     catch
                         _:Reason ->
-                            ?DTRACE(Trace, ?C_PUT_GET_PREPARE, [-2],
+                            ?DTRACE(Trace, ?C_GET_FSM_PREPARE, [-2],
                                     ["prepare", dtrace_errstr(Reason)]),
                             lager:error("Unable to forward put for ~p to ~p - ~p @ ~p\n",
                                         [BKey, CoordNode, Reason, erlang:get_stacktrace()]),
-                            process_reply({error, {coord_handoff_failed, Reason}}, StateData0)
+                            client_reply({error, {coord_handoff_failed, Reason}}, StateData)
                     end;
                 _ ->
                     %% Putting asis, no need to handle locally on a node in the
                     %% preflist, can coordinate from anywhere
-                    CoordPLEntry = case Must of
+                    CoordPLEntry = case Eco of
                                     true ->
                                         hd(LocalPL);
                                     _ ->
@@ -320,7 +331,7 @@ prepare(timeout, StateData=#state{bkey=BKey={Bucket,_Key},
                                 end,
                     %% This node is in the preference list, continue
                     StartTime = riak_core_util:moment(),
-                    StateData = StateData0#state{n = N,
+                    StateData1 = StateData#state{n = N,
                                                 bucket_props = Props,
                                                 coord_pl_entry = CoordPLEntry,
                                                 preflist2 = Preflist2,
@@ -329,12 +340,13 @@ prepare(timeout, StateData=#state{bkey=BKey={Bucket,_Key},
                     ?DTRACE(Trace, ?C_GET_FSM_PREPARE, [0], 
                             ["prepare", CoordPlNode]),
 					new_state_timeout(validate, 
-									  StateData#state{starttime=riak_core_util:moment(),
-													  n = N,
-													  bucket_props=Props,
-													  preflist2 = Preflist2,
-													  tracked_bucket = StatTracked,
-													  crdt_op = CrdtOp})
+									  StateData1#state{
+										starttime=riak_core_util:moment(),
+									    n = N,
+									    bucket_props=Props,
+									    preflist2 = Preflist2,
+									    tracked_bucket = StatTracked,
+									    crdt_op = CrdtOp})
             end
     end.
 
@@ -375,9 +387,15 @@ validate(timeout, StateData=#state{from = {raw, ReqId, _Pid}, options = Options,
             GetCore = riak_kv_get_core:init(N, R, PR, FailThreshold,
                                             NotFoundOk, AllowMult,
                                             DeletedVClock, IdxType),
-            new_state_timeout(execute, StateData#state{get_core = GetCore,
-                                                       timeout = Timeout,
-                                                       req_id = ReqId});
+			Eco = get_option(eco_get, Options, false),
+			case Eco of
+				true -> execute_local(StateData#state{get_core = GetCore,
+													  timeout = Timeout,
+													  req_id = ReqId});
+				false -> new_state_timeout(execute, 
+							StateData#state{get_core = GetCore, timeout = Timeout,
+											req_id = ReqId})
+			end;
         Error ->
             StateData2 = client_reply(Error, StateData),
             {stop, normal, StateData2}
@@ -400,9 +418,59 @@ validate_quorum(R, _ROpt, _N, _PR, _PROpt, _NumPrimaries, NumVnodes) when R > Nu
 validate_quorum(_R, _ROpt, _N, _PR, _PROpt, _NumPrimaries, _NumVnodes) ->
     ok.
 
+execute_local(StateData0=#state{bkey = BKey, 
+								req_id = ReqId, 
+								coord_pl_entry = CoordPLEntry,
+							    timeout = Timeout,
+							    trace = Trace}) ->
+    TRef = schedule_timeout(Timeout),
+    case Trace of
+        true ->
+            ?DTRACE(?C_GET_FSM_EXECUTE_LOCAL, [], ["execute"]);
+        _ ->
+            ok
+    end,
+    riak_kv_vnode:get(CoordPLEntry, BKey, ReqId),
+    StateData1 = StateData0#state{tref=TRef},
+    new_state(waiting_local_vnode, StateData1).
+
+waiting_local_vnode(request_timeout, StateData=#state{trace = Trace}) ->
+    ?DTRACE(Trace, ?C_GET_FSM_WAITING_LOCAL_VNODE, [-1], []),
+    client_reply({error,timeout}, StateData);
+waiting_local_vnode({r, VnodeResult, Idx, _ReqId}, 
+					StateData = #state{get_core = GetCore,
+									   coord_pl_entry = CoordPLEntry,
+									   options = Options0,
+									   preflist2 = Preflist0}) ->
+	case VnodeResult of
+		{ok, RObj} ->
+			UpdGetCore = riak_kv_get_core:add_result(Idx, VnodeResult, GetCore),
+			case riak_kv_get_core:enough(UpdGetCore) of
+				true ->
+					{Reply, UpdGetCore2} = riak_kv_get_core:response(UpdGetCore),
+					NewStateData = client_reply(Reply, StateData#state{get_core = UpdGetCore2}),
+					update_stats(Reply, NewStateData),
+					maybe_finalize(NewStateData);
+				false ->
+					%% don't use new_state/2 since we do timing per state, not per 
+					%% message in state
+					Preflist1 = Preflist0 -- [CoordPLEntry],
+					{next_state, execute, StateData#state{get_core = UpdGetCore,
+														  preflist2 = Preflist1,
+														  robj = RObj}}
+			end;
+		_ ->
+			%% no object at the coordinating vnode - send to preflist as a regular GET.
+			Options1 = lists:keyreplace(eco_get, 1, Options0, {eco_get, false}),
+			{next_state, execute, StateData#state{options = Options1}}
+	end.
+			
+
 %% @private
 execute(timeout, StateData0=#state{timeout=Timeout,req_id=ReqId,
                                    bkey=BKey, trace=Trace,
+								   options = Options,
+								   robj = RObj,
                                    preflist2 = Preflist2}) ->
     TRef = schedule_timeout(Timeout),
     Preflist = [IndexNode || {IndexNode, _Type} <- Preflist2],
@@ -414,7 +482,14 @@ execute(timeout, StateData0=#state{timeout=Timeout,req_id=ReqId,
         _ ->
             ok
     end,
-    riak_kv_vnode:get(Preflist, BKey, ReqId),
+	Eco = get_option(eco_get, Options, false),
+	case Eco of
+		true ->
+			Hash = riak_object:hash(RObj),
+			riak_kv_vnode:get(Preflist, BKey, ReqId, Hash);
+		false ->
+			riak_kv_vnode:get(Preflist, BKey, ReqId)
+	end,
     StateData = StateData0#state{tref=TRef},
     new_state(waiting_vnode_r, StateData).
 
@@ -430,6 +505,7 @@ preflist_for_tracing(Preflist) ->
 
 %% @private
 waiting_vnode_r({r, VnodeResult, Idx, _ReqId}, StateData = #state{get_core = GetCore,
+																  robj = RObj,
                                                                   trace=Trace}) ->
     case Trace of
         true ->
@@ -439,7 +515,13 @@ waiting_vnode_r({r, VnodeResult, Idx, _ReqId}, StateData = #state{get_core = Get
         _ ->
             ok
     end,
-    UpdGetCore = riak_kv_get_core:add_result(Idx, VnodeResult, GetCore),
+	UpdGetCore = 
+		case VnodeResult of
+			{r, VnodeResult, Idx, _ReqId} ->
+				riak_kv_get_core:add_result(Idx, VnodeResult, GetCore);
+			{r, hash_match, Idx, _ReqId} ->
+				riak_kv_get_core:add_result(Idx, {ok, RObj}, GetCore)
+		end,
     case riak_kv_get_core:enough(UpdGetCore) of
         true ->
             {Reply, UpdGetCore2} = riak_kv_get_core:response(UpdGetCore),
@@ -723,6 +805,14 @@ add_timing(Stage, State = #state{timing = Timing}) ->
 details() ->
     [timing,
      vnodes].
+
+dtrace_errstr(Term) ->
+    io_lib:format("~P", [Term, 12]).
+
+atom2list(A) when is_atom(A) ->
+    atom_to_list(A);
+atom2list(P) when is_pid(P)->
+    pid_to_list(P).                             % eunit tests
 
 -ifdef(TEST).
 -define(expect_msg(Exp,Timeout),

@@ -27,6 +27,8 @@
 -define(C_GET_FSM_RR,                 510).
 -define(C_GET_FSM_WAITING_RR,         511).
 -define(C_GET_FSM_WAITING_RR_TIMEOUT, 512).
+-define(C_GET_FSM_EXECUTE_LOCAL,      513).
+-define(C_GET_FSM_WAITING_LOCAL_VNODE, 514).
 
 -define(C_PUT_FSM_INIT,               520).
 -define(C_PUT_FSM_PREPARE,            521).
