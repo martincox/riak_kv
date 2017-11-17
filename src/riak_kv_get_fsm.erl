@@ -87,7 +87,7 @@
                 crdt_op :: undefined | true,
 				robj :: riak_object:riak_object(),
 				coord_pl_entry :: {integer(), atom()},
-				bad_coordinators :: [],
+				bad_coordinators = [] :: [],
 				coordinator_timeout :: integer()
                }).
 
@@ -233,7 +233,7 @@ init({test, Args, StateProps}) ->
     {ok, validate, TestStateData, 0}.
 
 %% @private
-prepare(timeout, StateData=#state{bkey=BKey={Bucket,_Key},
+prepare(timeout, StateData=#state{bkey=BKey={Bucket,Key},
                                   options=Options,
                                   trace=Trace,
 								  from=From,
@@ -302,7 +302,7 @@ prepare(timeout, StateData=#state{bkey=BKey={Bucket,_Key},
                                                [{ack_execute, self()}|Options]),
                         MiddleMan = spawn_coordinator_proc(
                                       CoordNode, riak_kv_get_fsm, start_link,
-                                      [From,BKey,Options2]),
+                                      [From,Bucket,Key,Options2]),
                         ?DTRACE(Trace, ?C_GET_FSM_PREPARE, [2],
                                 ["prepare", atom2list(CoordNode)]),
                         ok = riak_kv_stat:update(coord_redir),
@@ -486,7 +486,7 @@ execute(timeout, StateData0=#state{timeout=Timeout,req_id=ReqId,
 	case Eco of
 		true ->
 			Hash = riak_object:hash(RObj),
-			riak_kv_vnode:get(Preflist, BKey, ReqId, Hash);
+			riak_kv_vnode:eco_get(Preflist, BKey, ReqId, Hash);
 		false ->
 			riak_kv_vnode:get(Preflist, BKey, ReqId)
 	end,
@@ -517,10 +517,10 @@ waiting_vnode_r({r, VnodeResult, Idx, _ReqId}, StateData = #state{get_core = Get
     end,
 	UpdGetCore = 
 		case VnodeResult of
-			{r, VnodeResult, Idx, _ReqId} ->
-				riak_kv_get_core:add_result(Idx, VnodeResult, GetCore);
-			{r, hash_match, Idx, _ReqId} ->
-				riak_kv_get_core:add_result(Idx, {ok, RObj}, GetCore)
+			hash_match ->
+				riak_kv_get_core:add_result(Idx, {ok, RObj}, GetCore);
+			_ ->
+				riak_kv_get_core:add_result(Idx, VnodeResult, GetCore)
 		end,
     case riak_kv_get_core:enough(UpdGetCore) of
         true ->
