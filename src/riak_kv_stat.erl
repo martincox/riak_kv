@@ -261,8 +261,10 @@ do_update({read_repairs, Indices, Preflist}) ->
     do_repairs(Indices, Preflist);
 do_update(skipped_read_repairs) ->
     ok = exometer:update([?PFX, ?APP, node, gets, skipped_read_repairs], 1);
-do_update(coord_redir) ->
-    exometer:update([?PFX, ?APP, node, puts, coord_redirs], 1);
+do_update(put_coord_redir) ->
+    exometer:update([?PFX, ?APP, node, puts, put_coord_redirs], 1);
+do_update(get_coord_redir) ->
+    exometer:update([?PFX, ?APP, node, puts, get_coord_redirs], 1);
 do_update(mapper_start) ->
     exometer:update([?PFX, ?APP, mapper_count], 1);
 do_update(mapper_end) ->
@@ -516,6 +518,7 @@ stats() ->
      %% node stats: gets
      {[node, gets], spiral, [], [{one  , node_gets},
                                  {count, node_gets_total}]},
+     {[node, puts, get_coord_redirs], counter, [], [{value,get_coord_redirs_total}]},
      {[node, gets, fsm, active], counter, [], [{value, node_get_fsm_active}]},
      {[node, gets, fsm, errors], spiral, [], [{one, node_get_fsm_errors},
                                               {count, node_get_fsm_errors_total}]},
@@ -618,7 +621,7 @@ stats() ->
      %% node stats: puts
      {[node, puts], spiral, [], [{one, node_puts},
                                  {count, node_puts_total}]},
-     {[node, puts, coord_redirs], counter, [], [{value,coord_redirs_total}]},
+     {[node, puts, put_coord_redirs], counter, [], [{value,put_coord_redirs_total}]},
      {[node, puts, fsm, active], counter},
      {[node, puts, fsm, errors], spiral},
      {[node, puts, time], histogram, [], [{mean  , node_put_fsm_time_mean},

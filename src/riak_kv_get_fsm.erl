@@ -305,7 +305,7 @@ prepare(timeout, StateData=#state{bkey=BKey={Bucket,Key},
                                       [From,Bucket,Key,Options2]),
                         ?DTRACE(Trace, ?C_GET_FSM_PREPARE, [2],
                                 ["prepare", atom2list(CoordNode)]),
-                        ok = riak_kv_stat:update(coord_redir),
+                        ok = riak_kv_stat:update(get_coord_redir),
                         monitor_remote_coordinator(UseAckP, MiddleMan,
                                                    CoordNode, StateData)
                     catch
