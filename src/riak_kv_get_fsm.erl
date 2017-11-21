@@ -283,7 +283,7 @@ prepare(timeout, StateData=#state{bkey=BKey={Bucket,Key},
             %% Check if this node is in the preference list so it can coordinate
             LocalPL = [IndexNode || {{_Index, Node} = IndexNode, _Type} <- Preflist2,
                                 Node == node()],
-            Eco = (get_option(eco_get, Options, false) /= true),
+            Eco = get_option(eco_get, Options, false),
             case {Preflist2, LocalPL =:= [] andalso Eco == true} of
                 {[], _} ->
                     %% Empty preflist
@@ -462,7 +462,7 @@ waiting_local_vnode({r, VnodeResult, Idx, _ReqId},
 		_ ->
 			%% no object at the coordinating vnode - send to preflist as a regular GET.
 			Options1 = lists:keyreplace(eco_get, 1, Options0, {eco_get, false}),
-			{next_state, execute, StateData#state{options = Options1}}
+			new_state_timeout(execute, StateData#state{options = Options1})
 	end.
 			
 
@@ -530,7 +530,7 @@ waiting_vnode_r({r, VnodeResult, Idx, _ReqId}, StateData = #state{get_core = Get
             maybe_finalize(NewStateData);
         false ->
             %% don't use new_state/2 since we do timing per state, not per message in state
-            {next_state, waiting_vnode_r,  StateData#state{get_core = UpdGetCore}}
+            new_state_timeout(waiting_vnode_r,  StateData#state{get_core = UpdGetCore})
     end;
 waiting_vnode_r(request_timeout, StateData = #state{trace=Trace}) ->
     ?DTRACE(Trace, ?C_GET_FSM_WAITING_R_TIMEOUT, [-2], 
