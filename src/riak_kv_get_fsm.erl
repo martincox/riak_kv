@@ -455,9 +455,9 @@ waiting_local_vnode({r, VnodeResult, Idx, _ReqId},
 					%% don't use new_state/2 since we do timing per state, not per 
 					%% message in state
 					Preflist1 = Preflist0 -- [CoordPLEntry],
-					{next_state, execute, StateData#state{get_core = UpdGetCore,
+					new_state_timeout(execute, StateData#state{get_core = UpdGetCore,
 														  preflist2 = Preflist1,
-														  robj = RObj}}
+														  robj = RObj})
 			end;
 		_ ->
 			%% no object at the coordinating vnode - send to preflist as a regular GET.
