@@ -530,7 +530,7 @@ waiting_vnode_r({r, VnodeResult, Idx, _ReqId}, StateData = #state{get_core = Get
             maybe_finalize(NewStateData);
         false ->
             %% don't use new_state/2 since we do timing per state, not per message in state
-            new_state_timeout(waiting_vnode_r,  StateData#state{get_core = UpdGetCore})
+			{next_state, waiting_vnode_r,  StateData#state{get_core = UpdGetCore}}
     end;
 waiting_vnode_r(request_timeout, StateData = #state{trace=Trace}) ->
     ?DTRACE(Trace, ?C_GET_FSM_WAITING_R_TIMEOUT, [-2], 
