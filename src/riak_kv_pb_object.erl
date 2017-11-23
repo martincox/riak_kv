@@ -126,7 +126,7 @@ process(#rpbgetreq{bucket=B0, type=T, key=K, r=R0, pr=PR0, notfound_ok=NFOk,
                    basic_quorum=BQ, if_modified=VClock,
                    head=Head, deletedvclock=DeletedVClock,
                    n_val=N_val, sloppy_quorum=SloppyQuorum,
-                   timeout=Timeout}, #state{client=C} = State) ->
+                   timeout=Timeout, eco_get=Eco}, #state{client=C} = State) ->
     R = decode_quorum(R0),
     PR = decode_quorum(PR0),
     B = maybe_bucket_type(T, B0),
@@ -137,7 +137,8 @@ process(#rpbgetreq{bucket=B0, type=T, key=K, r=R0, pr=PR0, notfound_ok=NFOk,
                    make_option(notfound_ok, NFOk) ++
                    make_option(basic_quorum, BQ) ++
                    make_option(n_val, N_val) ++
-                   make_option(sloppy_quorum, SloppyQuorum)) of
+                   make_option(sloppy_quorum, SloppyQuorum) ++
+                   make_option(eco_get, Eco)) of
         {ok, O} ->
 
             case erlify_rpbvc(VClock) == riak_object:vclock(O) of
