@@ -57,7 +57,7 @@
 		%% default = undefined
         {crdt_op, true | undefined} |         
 		%% Force preflist node to handle request.
-		{eco_get, false}.					
+		{coord_get, false}.					
 
 -type options() :: [option()].
 -type req_id() :: non_neg_integer().
@@ -85,10 +85,10 @@
                 calculated_timings :: {ResponseUSecs::non_neg_integer(),
                                        [{StateName::atom(), TimeUSecs::non_neg_integer()}]} | undefined,
                 crdt_op :: undefined | true,
-				robj :: riak_object:riak_object(),
-				coord_pl_entry :: {integer(), atom()},
-				bad_coordinators = [] :: [],
-				coordinator_timeout :: integer()
+                robj :: riak_object:riak_object(),
+                coord_pl_entry :: {integer(), atom()},
+                bad_coordinators = [] :: [],
+                coordinator_timeout :: integer()
                }).
 
 -include("riak_kv_dtrace.hrl").
@@ -134,6 +134,13 @@ start(From, Bucket, Key, GetOptions) ->
 %% `start_link' function has been renamed `start' since it doesn't actually link
 %% to the caller.
 start_link(From, Bucket, Key, GetOptions) -> start(From, Bucket, Key, GetOptions).
+
+set_get_coordinator_failure_timeout(MS) when is_integer(MS), MS >= 0 ->
+    application:set_env(riak_kv, get_coordinator_failure_timeout, MS);
+set_get_coordinator_failure_timeout(Bad) ->
+    lager:error("~s:set_get_coordinator_failure_timeout(~p) invalid",
+                [?MODULE, Bad]),
+    set_get_coordinator_failure_timeout(3000).
 
 get_get_coordinator_failure_timeout() ->
     app_helper:get_env(riak_kv, get_coordinator_failure_timeout, 3000).
@@ -216,6 +223,13 @@ init([From, Bucket, Key, Options0]) ->
             ?DTRACE(?C_GET_FSM_INIT, [], ["init"]);
         _ -> 
             ok
+    End,
+    %% Ack back to the originating fsm if required.
+    case get_option(ack_execute, Options0) of
+        undefined ->
+            ok;
+        Pid ->
+            Pid ! {ack, node(), now_executing}
     end,
     {ok, prepare, StateData, 0};
 init({test, Args, StateProps}) ->
@@ -283,11 +297,11 @@ prepare(timeout, StateData=#state{bkey=BKey={Bucket,Key},
             %% Check if this node is in the preference list so it can coordinate
             LocalPL = [IndexNode || {{_Index, Node} = IndexNode, _Type} <- Preflist2,
                                 Node == node()],
-            Eco = get_option(eco_get, Options, false),
-            case {Preflist2, LocalPL =:= [] andalso Eco == true} of
+            Coord = get_option(coord_get, Options, false),
+            case {Preflist2, LocalPL =:= [] andalso Coord == true} of
                 {[], _} ->
                     %% Empty preflist
-                    ?DTRACE(Trace, ?C_PUT_FSM_PREPARE, [-1], 
+                    ?DTRACE(Trace, ?C_GET_FSM_PREPARE, [-1], 
                             ["prepare",<<"all nodes down">>]),
                     client_reply({error, all_nodes_down}, StateData);
                 {_, true} ->
@@ -295,7 +309,7 @@ prepare(timeout, StateData=#state{bkey=BKey={Bucket,Key},
                     %% forward on to a random node
                     {ListPos, _} = random:uniform_s(length(Preflist2), os:timestamp()),
                     {{_Idx, CoordNode},_Type} = lists:nth(ListPos, Preflist2),
-                    ?DTRACE(Trace, ?C_PUT_FSM_PREPARE, [1],
+                    ?DTRACE(Trace, ?C_GET_FSM_PREPARE, [1],
                             ["prepare", atom2list(CoordNode)]),
                     try
                         {UseAckP, Options2} = make_ack_options(
@@ -312,14 +326,14 @@ prepare(timeout, StateData=#state{bkey=BKey={Bucket,Key},
                         _:Reason ->
                             ?DTRACE(Trace, ?C_GET_FSM_PREPARE, [-2],
                                     ["prepare", dtrace_errstr(Reason)]),
-                            lager:error("Unable to forward put for ~p to ~p - ~p @ ~p\n",
+                            lager:error("Unable to forward get for ~p to ~p - ~p @ ~p\n",
                                         [BKey, CoordNode, Reason, erlang:get_stacktrace()]),
                             client_reply({error, {coord_handoff_failed, Reason}}, StateData)
                     end;
                 _ ->
                     %% Putting asis, no need to handle locally on a node in the
                     %% preflist, can coordinate from anywhere
-                    CoordPLEntry = case Eco of
+                    CoordPLEntry = case Coord of
                                     true ->
                                         hd(LocalPL);
                                     _ ->
@@ -387,8 +401,7 @@ validate(timeout, StateData=#state{from = {raw, ReqId, _Pid}, options = Options,
             GetCore = riak_kv_get_core:init(N, R, PR, FailThreshold,
                                             NotFoundOk, AllowMult,
                                             DeletedVClock, IdxType),
-			Eco = get_option(eco_get, Options, false),
-			case Eco of
+			case get_option(coord_get, Options, false) of
 				true -> execute_local(StateData#state{get_core = GetCore,
 													  timeout = Timeout,
 													  req_id = ReqId});
@@ -422,7 +435,8 @@ execute_local(StateData0=#state{bkey = BKey,
 								req_id = ReqId, 
 								coord_pl_entry = CoordPLEntry,
 							    timeout = Timeout,
-							    trace = Trace}) ->
+							    trace = Trace,
+                                options = Options}) ->
     TRef = schedule_timeout(Timeout),
     case Trace of
         true ->
@@ -430,9 +444,14 @@ execute_local(StateData0=#state{bkey = BKey,
         _ ->
             ok
     end,
+    case get_option(ack_execute, Options) of
+        undefined ->
+            ok;
+        Pid ->
+            Pid ! {ack, node(), now_executing}
+    end,
     riak_kv_vnode:get(CoordPLEntry, BKey, ReqId),
-    StateData1 = StateData0#state{tref=TRef},
-    new_state(waiting_local_vnode, StateData1).
+    new_state(waiting_local_vnode, StateData0#state{tref=TRef}).
 
 waiting_local_vnode(request_timeout, StateData=#state{trace = Trace}) ->
     ?DTRACE(Trace, ?C_GET_FSM_WAITING_LOCAL_VNODE, [-1], []),
@@ -461,7 +480,7 @@ waiting_local_vnode({r, VnodeResult, Idx, _ReqId},
 			end;
 		_ ->
 			%% no object at the coordinating vnode - send to preflist as a regular GET.
-			Options1 = lists:keyreplace(eco_get, 1, Options0, {eco_get, false}),
+			Options1 = lists:keyreplace(coord_get, 1, Options0, {coord_get, false}),
 			new_state_timeout(execute, StateData#state{options = Options1})
 	end.
 			
@@ -472,7 +491,6 @@ execute(timeout, StateData0=#state{timeout=Timeout,req_id=ReqId,
 								   options = Options,
 								   robj = RObj,
                                    preflist2 = Preflist2}) ->
-    TRef = schedule_timeout(Timeout),
     Preflist = [IndexNode || {IndexNode, _Type} <- Preflist2],
     case Trace of
         true ->
@@ -482,16 +500,14 @@ execute(timeout, StateData0=#state{timeout=Timeout,req_id=ReqId,
         _ ->
             ok
     end,
-	Eco = get_option(eco_get, Options, false),
-	case Eco of
+	case get_option(coord_get, Options, false) of
 		true ->
 			Hash = riak_object:hash(RObj),
-			riak_kv_vnode:eco_get(Preflist, BKey, ReqId, Hash);
+			riak_kv_vnode:coord_get(Preflist, BKey, ReqId, Hash);
 		false ->
 			riak_kv_vnode:get(Preflist, BKey, ReqId)
 	end,
-    StateData = StateData0#state{tref=TRef},
-    new_state(waiting_vnode_r, StateData).
+    new_state(waiting_vnode_r, StateData0).
 
 %% @private calculate a concatenated preflist for tracing macro
 preflist_for_tracing(Preflist) ->
@@ -515,13 +531,19 @@ waiting_vnode_r({r, VnodeResult, Idx, _ReqId}, StateData = #state{get_core = Get
         _ ->
             ok
     end,
-	UpdGetCore = 
+	Result = 
 		case VnodeResult of
+            %% If the response is from a coord_get, the result may be a hash_match
+            %% message and not an r_object, as with normal get behaviour.
 			hash_match ->
-				riak_kv_get_core:add_result(Idx, {ok, RObj}, GetCore);
+                %% If the remote vnode responds with hash_match, it is consistent
+                %% with the coord vnode - add our local r_obj to the get_core. Anything
+                %% else, add the remote vnode's response as usual.
+				{ok, RObj};
 			_ ->
-				riak_kv_get_core:add_result(Idx, VnodeResult, GetCore)
+				VnodeResult
 		end,
+	UpdGetCore = riak_kv_get_core:add_result(Id, Result, GetCore)
     case riak_kv_get_core:enough(UpdGetCore) of
         true ->
             {Reply, UpdGetCore2} = riak_kv_get_core:response(UpdGetCore),
@@ -541,7 +563,8 @@ waiting_vnode_r(request_timeout, StateData = #state{trace=Trace}) ->
 
 %% @private
 waiting_read_repair({r, VnodeResult, Idx, _ReqId},
-                    StateData = #state{get_core = GetCore, trace=Trace}) ->
+                    StateData = #state{get_core = GetCore, trace=Trace, 
+                                       robj=RObj}) ->
     case Trace of
         true ->
             ShortCode = riak_kv_get_core:result_shortcode(VnodeResult),
@@ -551,7 +574,19 @@ waiting_read_repair({r, VnodeResult, Idx, _ReqId},
         _ -> 
             ok
     end,
-    UpdGetCore = riak_kv_get_core:add_result(Idx, VnodeResult, GetCore),
+	Result = 
+		case VnodeResult of
+            %% If the response is from a coord_get, the result may be a hash_match
+            %% message and not an r_object, as with normal get behaviour.
+			hash_match ->
+                %% If the remote vnode responds with hash_match, it is consistent
+                %% with the coord vnode - add our local r_obj to the get_core. Anything
+                %% else, add the remote vnode's response as usual.
+				{ok, RObj};
+			_ ->
+				VnodeResult
+		end,
+    UpdGetCore = riak_kv_get_core:add_result(Idx, Result, GetCore),
     maybe_finalize(StateData#state{get_core = UpdGetCore});
 waiting_read_repair(request_timeout, StateData = #state{trace=Trace}) ->
     ?DTRACE(Trace, ?C_GET_FSM_WAITING_RR_TIMEOUT, [-2],
@@ -813,6 +848,19 @@ atom2list(A) when is_atom(A) ->
     atom_to_list(A);
 atom2list(P) when is_pid(P)->
     pid_to_list(P).                             % eunit tests
+
+handle_info(request_timeout, StateName, StateData) ->
+    ?MODULE:StateName(request_timeout, StateData);
+handle_info({ack, Node, now_executing}, StateName, StateData) ->
+    late_get_fsm_coordinator_ack(Node),
+    ok = riak_kv_stat:update(late_get_fsm_coordinator_ack),
+    {next_state, StateName, StateData};
+handle_info(_Info, _StateName, StateData) ->
+    {stop,badmsg,StateData}.
+
+%% This function is for dbg tracing purposes
+late_get_fsm_coordinator_ack(_Node) ->
+    ok.
 
 -ifdef(TEST).
 -define(expect_msg(Exp,Timeout),

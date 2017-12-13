@@ -28,7 +28,7 @@
          start_vnodes/1,
          get/3,
          get/4,
-		 eco_get/4,
+         coord_get/4,
          del/3,
          put/6,
          local_get/2,
@@ -270,15 +270,15 @@ get(Preflist, BKey, ReqId, Sender) ->
                                    Sender,
                                    riak_kv_vnode_master).
 
-eco_get(Preflist, BKey, ReqId, Hash) ->
+coord_get(Preflist, BKey, ReqId, Hash) ->
     %% Assuming this function is called from a FSM process
     %% so self() == FSM pid
-    eco_get(Preflist, BKey, ReqId, Hash, {fsm, undefined, self()}).
+    coord_get(Preflist, BKey, ReqId, Hash, {fsm, undefined, self()}).
 
-eco_get(Preflist, BKey, ReqId, Hash, Sender) ->
-    Req = ?KV_ECO_GET_REQ{bkey=sanitize_bkey(BKey),
-					  hash=Hash,
-                      req_id=ReqId},
+coord_get(Preflist, BKey, ReqId, Hash, Sender) ->
+    Req = ?KV_COORD_GET_REQ{bkey=sanitize_bkey(BKey),
+                            hash=Hash,
+                            req_id=ReqId},
     riak_core_vnode_master:command(Preflist,
                                    Req,
                                    Sender,
@@ -590,8 +590,8 @@ handle_command(?KV_PUT_REQ{bkey=BKey,
 
 handle_command(?KV_GET_REQ{bkey=BKey,req_id=ReqId},Sender,State) ->
     do_get(Sender, BKey, ReqId, State);
-handle_command(?KV_ECO_GET_REQ{bkey=BKey,hash=Hash,req_id=ReqId},Sender,State) ->
-    do_eco_get(Sender, BKey, Hash, ReqId, State);
+handle_command(?KV_COORD_GET_REQ{bkey=BKey,hash=Hash,req_id=ReqId},Sender,State) ->
+    do_coord_get(Sender, BKey, Hash, ReqId, State);
 handle_command(#riak_kv_listkeys_req_v2{bucket=Input, req_id=ReqId, caller=Caller}, _Sender,
                State=#state{async_folding=AsyncFolding,
                             key_buf_size=BufferSize,
@@ -1811,22 +1811,22 @@ do_get(_Sender, BKey, ReqID,
     {reply, {r, Retval, Idx, ReqID}, State#state{modstate=ModState1}}.
 
 %% @private
-do_eco_get(_Sender, BKey, Hash, ReqID,
+do_coord_get(_Sender, BKey, Hash, ReqID,
        State=#state{idx=Idx, mod=Mod, modstate=ModState}) ->
     StartTS = os:timestamp(),
     {Retval0, ModState1} = do_get_term(BKey, Mod, ModState),
-	Retval1 = 
-		case Retval0 of
-			{ok, Obj} ->
-				maybe_cache_object(BKey, Obj, State),
-				ObjHash = riak_object:hash(Obj),
-				case ObjHash =:= Hash of
-					true -> hash_match;
-					_ -> Retval0
-				end;
-			_ ->
-				Retval0
-		end,
+    Retval1 = 
+        case Retval0 of
+            {ok, Obj} ->
+                maybe_cache_object(BKey, Obj, State),
+                ObjHash = riak_object:hash(Obj, 0),
+                case ObjHash =:= Hash of
+                    true -> hash_match;
+                    _ -> Retval0
+                end;
+            _ ->
+                Retval0
+        end,
     update_vnode_stats(vnode_get, Idx, StartTS),
     {reply, {r, Retval1, Idx, ReqID}, State#state{modstate=ModState1}}.
 

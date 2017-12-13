@@ -307,6 +307,8 @@ do_update({Type, bytes, Bytes}) ->
     exometer:update([?PFX, ?APP, Type, bytes, total], Bytes);
 do_update(late_put_fsm_coordinator_ack) ->
     exometer:update([?PFX, ?APP, late_put_fsm_coordinator_ack], 1);
+do_update(late_get_fsm_coordinator_ack) ->
+    exometer:update([?PFX, ?APP, late_get_fsm_coordinator_ack], 1);
 do_update({consistent_get, _Bucket, Microsecs, undefined}) ->
     P = ?PFX,
     ok = exometer:update([P, ?APP, consistent, gets], 1),
@@ -736,6 +738,7 @@ stats() ->
 						  {99    , object_map_merge_time_99},
 						  {max   , object_map_merge_time_100}]},
      {late_put_fsm_coordinator_ack, counter, [], [{value, late_put_fsm_coordinator_ack}]},
+     {late_get_fsm_coordinator_ack, counter, [], [{value, late_put_get_coordinator_ack}]},
 
      %% strong-consistency stats
      {[consistent, gets], spiral, [], [{one, consistent_gets},

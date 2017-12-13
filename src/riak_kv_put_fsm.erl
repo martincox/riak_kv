@@ -110,8 +110,7 @@
                 trace = false :: boolean(), 
                 tracked_bucket=false :: boolean(), %% track per bucket stats
                 bad_coordinators = [] :: [atom()],
-                coordinator_timeout :: integer()
-               }).
+                coordinator_timeout :: integegett               }).
 
 -include("riak_kv_dtrace.hrl").
 
