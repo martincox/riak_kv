@@ -31,6 +31,7 @@
 -export([init/1, handle_event/3, handle_sync_event/4,
          handle_info/3, terminate/3, code_change/4]).
 -export([prepare/2,validate/2,execute/2,waiting_local_vnode/2,waiting_vnode_r/2,waiting_read_repair/2]).
+-export([set_get_coordinator_failure_timeout/1]).
 
 -type detail() :: timing |
                   vnodes.
@@ -223,13 +224,6 @@ init([From, Bucket, Key, Options0]) ->
             ?DTRACE(?C_GET_FSM_INIT, [], ["init"]);
         _ -> 
             ok
-    End,
-    %% Ack back to the originating fsm if required.
-    case get_option(ack_execute, Options0) of
-        undefined ->
-            ok;
-        Pid ->
-            Pid ! {ack, node(), now_executing}
     end,
     {ok, prepare, StateData, 0};
 init({test, Args, StateProps}) ->
@@ -486,7 +480,7 @@ waiting_local_vnode({r, VnodeResult, Idx, _ReqId},
 			
 
 %% @private
-execute(timeout, StateData0=#state{timeout=Timeout,req_id=ReqId,
+execute(timeout, StateData0=#state{req_id=ReqId,
                                    bkey=BKey, trace=Trace,
 								   options = Options,
 								   robj = RObj,
@@ -543,7 +537,7 @@ waiting_vnode_r({r, VnodeResult, Idx, _ReqId}, StateData = #state{get_core = Get
 			_ ->
 				VnodeResult
 		end,
-	UpdGetCore = riak_kv_get_core:add_result(Id, Result, GetCore)
+	UpdGetCore = riak_kv_get_core:add_result(Idx, Result, GetCore),
     case riak_kv_get_core:enough(UpdGetCore) of
         true ->
             {Reply, UpdGetCore2} = riak_kv_get_core:response(UpdGetCore),
@@ -601,10 +595,12 @@ handle_event(_Event, _StateName, StateData) ->
 handle_sync_event(_Event, _From, _StateName, StateData) ->
     {stop,badmsg,StateData}.
 
-%% @private
 handle_info(request_timeout, StateName, StateData) ->
     ?MODULE:StateName(request_timeout, StateData);
-%% @private
+handle_info({ack, Node, now_executing}, StateName, StateData) ->
+    late_get_fsm_coordinator_ack(Node),
+    ok = riak_kv_stat:update(late_get_fsm_coordinator_ack),
+    {next_state, StateName, StateData};
 handle_info(_Info, _StateName, StateData) ->
     {stop,badmsg,StateData}.
 
@@ -848,15 +844,6 @@ atom2list(A) when is_atom(A) ->
     atom_to_list(A);
 atom2list(P) when is_pid(P)->
     pid_to_list(P).                             % eunit tests
-
-handle_info(request_timeout, StateName, StateData) ->
-    ?MODULE:StateName(request_timeout, StateData);
-handle_info({ack, Node, now_executing}, StateName, StateData) ->
-    late_get_fsm_coordinator_ack(Node),
-    ok = riak_kv_stat:update(late_get_fsm_coordinator_ack),
-    {next_state, StateName, StateData};
-handle_info(_Info, _StateName, StateData) ->
-    {stop,badmsg,StateData}.
 
 %% This function is for dbg tracing purposes
 late_get_fsm_coordinator_ack(_Node) ->
