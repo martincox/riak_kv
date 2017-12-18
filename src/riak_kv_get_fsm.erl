@@ -299,8 +299,8 @@ prepare(timeout, StateData=#state{bkey=BKey={Bucket,Key},
                             ["prepare",<<"all nodes down">>]),
                     client_reply({error, all_nodes_down}, StateData);
                 {_, true} ->
-                    %% This node is not in the preference list
-                    %% forward on to a random node
+                    %% This node is not in the preference list and coord option
+                    %% is set, forward to a random PL node to handle.
                     {ListPos, _} = random:uniform_s(length(Preflist2), os:timestamp()),
                     {{_Idx, CoordNode},_Type} = lists:nth(ListPos, Preflist2),
                     ?DTRACE(Trace, ?C_GET_FSM_PREPARE, [1],
@@ -325,8 +325,7 @@ prepare(timeout, StateData=#state{bkey=BKey={Bucket,Key},
                             client_reply({error, {coord_handoff_failed, Reason}}, StateData)
                     end;
                 _ ->
-                    %% Putting asis, no need to handle locally on a node in the
-                    %% preflist, can coordinate from anywhere
+                    %% 
                     CoordPLEntry = case Coord of
                                     true ->
                                         hd(LocalPL);
@@ -349,7 +348,6 @@ prepare(timeout, StateData=#state{bkey=BKey={Bucket,Key},
                             ["prepare", CoordPlNode]),
 					new_state_timeout(validate, 
 									  StateData1#state{
-										starttime=riak_core_util:moment(),
 									    n = N,
 									    bucket_props=Props,
 									    preflist2 = Preflist2,
@@ -395,13 +393,12 @@ validate(timeout, StateData=#state{from = {raw, ReqId, _Pid}, options = Options,
             GetCore = riak_kv_get_core:init(N, R, PR, FailThreshold,
                                             NotFoundOk, AllowMult,
                                             DeletedVClock, IdxType),
+            TRef = schedule_timeout(Timeout),
+            StateData1 = StateData#state{get_core = GetCore, timeout = Timeout,
+                                         req_id = ReqId, tref = TRef},
 			case get_option(coord_get, Options, false) of
-				true -> execute_local(StateData#state{get_core = GetCore,
-													  timeout = Timeout,
-													  req_id = ReqId});
-				false -> new_state_timeout(execute, 
-							StateData#state{get_core = GetCore, timeout = Timeout,
-											req_id = ReqId})
+				true -> execute_local(StateData1);
+				false -> new_state(execute, StateData1)
 			end;
         Error ->
             StateData2 = client_reply(Error, StateData),
@@ -428,10 +425,8 @@ validate_quorum(_R, _ROpt, _N, _PR, _PROpt, _NumPrimaries, _NumVnodes) ->
 execute_local(StateData0=#state{bkey = BKey, 
 								req_id = ReqId, 
 								coord_pl_entry = CoordPLEntry,
-							    timeout = Timeout,
 							    trace = Trace,
                                 options = Options}) ->
-    TRef = schedule_timeout(Timeout),
     case Trace of
         true ->
             ?DTRACE(?C_GET_FSM_EXECUTE_LOCAL, [], ["execute"]);
@@ -444,8 +439,10 @@ execute_local(StateData0=#state{bkey = BKey,
         Pid ->
             Pid ! {ack, node(), now_executing}
     end,
+    %% Send get to CPL node and wait for response before sending to rest of the 
+    %% preflist.
     riak_kv_vnode:get(CoordPLEntry, BKey, ReqId),
-    new_state(waiting_local_vnode, StateData0#state{tref=TRef}).
+    new_state(waiting_local_vnode, StateData0).
 
 waiting_local_vnode(request_timeout, StateData=#state{trace = Trace}) ->
     ?DTRACE(Trace, ?C_GET_FSM_WAITING_LOCAL_VNODE, [-1], []),
@@ -468,14 +465,14 @@ waiting_local_vnode({r, VnodeResult, Idx, _ReqId},
 					%% don't use new_state/2 since we do timing per state, not per 
 					%% message in state
 					Preflist1 = Preflist0 -- [CoordPLEntry],
-					new_state_timeout(execute, StateData#state{get_core = UpdGetCore,
+					new_state(execute, StateData#state{get_core = UpdGetCore,
 														  preflist2 = Preflist1,
 														  robj = RObj})
 			end;
 		_ ->
-			%% no object at the coordinating vnode - send to preflist as a regular GET.
+			%% No object at the coordinating vnode - send to preflist as a regular GET.
 			Options1 = lists:keyreplace(coord_get, 1, Options0, {coord_get, false}),
-			new_state_timeout(execute, StateData#state{options = Options1})
+			new_state(execute, StateData#state{options = Options1})
 	end.
 			
 
@@ -496,7 +493,10 @@ execute(timeout, StateData0=#state{req_id=ReqId,
     end,
 	case get_option(coord_get, Options, false) of
 		true ->
-			Hash = riak_object:hash(RObj),
+            %% Get the hash of the object. Explicitly non-legacy. Don't want to
+            %% handle alternate hashing mechanisms for different versions. This
+            %% will only work with version 0 objects.
+			Hash = riak_object:hash(RObj, 0),
 			riak_kv_vnode:coord_get(Preflist, BKey, ReqId, Hash);
 		false ->
 			riak_kv_vnode:get(Preflist, BKey, ReqId)
