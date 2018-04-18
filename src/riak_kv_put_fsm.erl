@@ -107,6 +107,7 @@
                 put_usecs :: undefined | non_neg_integer(),
                 timing = [] :: [{atom(), {non_neg_integer(), non_neg_integer(),
                                           non_neg_integer()}}],
+                remote_timing = [] :: list(),
                 reply, % reply sent to client,
                 trace = false :: boolean(), 
                 tracked_bucket=false :: boolean(), %% track per bucket stats
@@ -609,7 +610,7 @@ execute_remote(StateData=#state{robj=RObj, req_id = ReqId,
                 ?DTRACE(?C_PUT_FSM_EXECUTE_REMOTE, [], [Ps]),
                 add_timing(execute_remote, StateData);
             _ ->
-                StateData
+                add_timing(execute_remote, StateData)
         end,
     riak_kv_vnode:put(Preflist, BKey, RObj, ReqId, StartTime, VnodeOptions),
     case riak_kv_put_core:enough(PutCore) of
@@ -681,7 +682,8 @@ finish(timeout, StateData = #state{timing = Timing, reply = Reply,
                                    bkey = {Bucket, _Key},
                                    trace = Trace,
                                    tracked_bucket = StatTracked,
-                                   options = Options}) ->
+                                   options = Options,
+                                   putcore = PutCore}) ->
     case Reply of
         {error, _} -> 
             ?DTRACE(Trace, ?C_PUT_FSM_FINISH, [-1], []),
@@ -693,6 +695,7 @@ finish(timeout, StateData = #state{timing = Timing, reply = Reply,
                 #crdt_op{mod=Mod} -> Mod;
                 _ -> undefined
             end,
+            ok = riak_kv_response_timing:add_timing(Timing, PutCore),
             {Duration, Stages} = riak_kv_fsm_timing:calc_timing(Timing),
             ok = riak_kv_stat:update({put_fsm_time, Bucket, Duration,
                                       Stages, StatTracked, CRDTMod}),

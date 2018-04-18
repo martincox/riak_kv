@@ -21,7 +21,7 @@
 %% -------------------------------------------------------------------
 -module(riak_kv_put_core).
 -export([init/8, add_result/2, enough/1, response/1,
-         final/1, result_shortcode/1, result_idx/1]).
+         final/1, result_shortcode/1, result_idx/1, reply_times/1]).
 -export_type([putcore/0, result/0, reply/0]).
 
 -ifdef(TEST).
@@ -39,7 +39,7 @@
                  {ok, riak_object:riak_object()} |
                  {error, notfound} |
                  {error, any()}.
--type idxresult() :: {non_neg_integer(), result()}.
+-type idxresult() :: {non_neg_integer(), result(), erlang:timestamp()}.
 -type idx_type() :: [{non_neg_integer(), 'primary' | 'fallback', node()}].
 -record(putcore, {n :: pos_integer(),
                   w :: non_neg_integer(),
@@ -90,19 +90,19 @@ calculate_fail_threshold(N, Q) ->
 -spec add_result(vput_result(), putcore()) -> putcore().
 add_result({w, Idx, _ReqId}, PutCore = #putcore{results = Results,
                                                 num_w = NumW}) ->
-    PutCore#putcore{results = [{Idx, w} | Results],
+    PutCore#putcore{results = [{Idx, w, os:timestamp()} | Results],
                     num_w = NumW + 1};
 add_result({dw, Idx, _ReqId}, PutCore = #putcore{results = Results,
                                                  num_dw = NumDW}) ->
-    num_node_confirms(num_pw(PutCore#putcore{results = [{Idx, {dw, undefined}} | Results],
+    num_node_confirms(num_pw(PutCore#putcore{results = [{Idx, {dw, undefined}, os:timestamp()} | Results],
                     num_dw = NumDW + 1}, Idx));
 add_result({dw, Idx, ResObj, _ReqId}, PutCore = #putcore{results = Results,
                                                          num_dw = NumDW}) ->
-    num_node_confirms(num_pw(PutCore#putcore{results = [{Idx, {dw, ResObj}} | Results],
+    num_node_confirms(num_pw(PutCore#putcore{results = [{Idx, {dw, ResObj}, os:timestamp()} | Results],
                     num_dw = NumDW + 1}, Idx));
 add_result({fail, Idx, _ReqId}, PutCore = #putcore{results = Results,
                                                    num_fail = NumFail}) ->
-    PutCore#putcore{results = [{Idx, {error, undefined}} | Results],
+    PutCore#putcore{results = [{Idx, {error, undefined}, os:timestamp()} | Results],
                     num_fail = NumFail + 1};
 add_result(_Other, PutCore = #putcore{num_fail = NumFail}) ->
     %% Treat unrecognized messages as failures - no index to store them against
@@ -166,12 +166,15 @@ response(PutCore = #putcore{n = N, num_fail = NumFail, dw = DW, num_dw = NumDW})
 
 %% Check for vnode overload
 check_overload(Response, PutCore = #putcore{results=Results}) ->
-    case [x || {_,{error, overload}} <- Results] of
+    case [x || {_,{error, overload}, _Time} <- Results] of
         [] ->
             {Response, PutCore};
         _->
             {{error, overload}, PutCore}
     end.
+
+reply_times(#putcore{results = Results}) ->
+    [{Idx, Time} || {Idx, _, Time} <- Results].
 
 %% Get final value - if returnbody did not need the result it allows delaying
 %% running reconcile until after the client reply is sent.
@@ -180,7 +183,7 @@ final(PutCore = #putcore{final_obj = FinalObj,
                          results = Results, allowmult = AllowMult}) ->
     case FinalObj of
         undefined ->
-            RObjs = [RObj || {_Idx, {dw, RObj}} <- Results, RObj /= undefined],
+            RObjs = [RObj || {_Idx, {dw, RObj}, _Time} <- Results, RObj /= undefined],
             ReplyObj = case RObjs of
                            [] ->
                                undefined;
@@ -233,7 +236,7 @@ num_pw(PutCore = #putcore{num_pw=NumPW, idx_type=IdxType}, Idx) ->
 %% @private Calculate number of physically diverse partitions in results
 -spec count_diverse_nodes(IDXType::idx_type(), [idxresult()]) -> non_neg_integer().
 count_diverse_nodes(IdxType, Results) ->
-    DWrites = [Part || {Part, {dw, _}} <- Results ],
+    DWrites = [Part || {Part, {dw, _}, _Time} <- Results ],
     count_physically_diverse(IdxType, DWrites, []).
 
 -spec count_physically_diverse(IDXType::idx_type(), [non_neg_integer()], [node()]) -> non_neg_integer().

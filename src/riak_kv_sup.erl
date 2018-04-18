@@ -93,6 +93,10 @@ init([]) ->
                     {riak_kv_ensembles, start_link, []},
                     permanent, 30000, worker, [riak_kv_ensembles]},
 
+    TimingKV =  {riak_kv_response_timing,
+                    {riak_kv_response_timing, start_link, []},
+                    permanent, 30000, worker, [riak_kv_response_timing]},
+
     % Figure out which processes we should run...
     HasStorageBackend = (app_helper:get_env(riak_kv, storage_backend) /= undefined),
 
@@ -111,7 +115,8 @@ init([]) ->
         MapJSPool,
         ReduceJSPool,
         HookJSPool,
-        HTTPCache
+        HTTPCache,
+        TimingKV
     ]),
 
     % Run the proesses...
