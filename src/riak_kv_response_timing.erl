@@ -4,7 +4,8 @@
 
 %% API
 -export([start_link/0,
-         add_timing/2]).
+         add_timing/2,
+         get_timing/1]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -15,9 +16,11 @@
          code_change/3]).
 
 -define(SERVER, ?MODULE).
+-define(UPDATE_INTERVAL, 60000).
 
 -record(state, {
-          timing_table
+          timing_table,
+          timings :: dict()
          }).
 
 %%%===================================================================
@@ -25,10 +28,10 @@
 %%%===================================================================
 
 add_timing(Timing, PutCore) ->
-    RemoteStartTime = proplists:get_value(execute_remote, Timing),
-    lager:info("~p", [Timing]),
-    ReplyTimes = riak_kv_put_core:reply_times(PutCore),
-    gen_server:cast(?MODULE, {add_reply_times, RemoteStartTime, ReplyTimes}).
+    gen_server:cast(?MODULE, {add_timing, Timing, PutCore}).
+
+get_timing(Idx) ->
+    ets:lookup(?MODULE, Idx).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -56,8 +59,11 @@ start_link() ->
 %% @end
 %%--------------------------------------------------------------------
 init([]) ->
-    Table = ets:new(?MODULE, []),
-    {ok, #state{timing_table = Table}}.
+    Table = ets:new(?MODULE, [named_table, {read_concurrency, true}]),
+    Timings0 = dict:new(),
+    Timings1 = dict:append(0, 0, Timings0),
+    schedule_update(),
+    {ok, #state{timing_table = Table, timings = Timings1}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -77,14 +83,17 @@ handle_call(_Request, _From, State) ->
     Reply = ok,
     {reply, Reply, State}.
 
-handle_cast({add_reply_times, RemoteStartTime, ReplyTimes}, 
-             State = #state{timing_table = Table}) ->
-    lists:foreach(
-        fun({Idx, Time}) -> 
-            Diff = timer:now_diff(Time, RemoteStartTime),
-            ets:insert(Table, {Idx, Diff})
-        end, ReplyTimes),
-    {noreply, State};
+handle_cast({add_timing, Timing, PutCore}, 
+             State = #state{timings = Timings}) ->
+    RemoteStartTime = proplists:get_value(execute_remote, Timing),
+    lager:info("~p", [Timing]),
+    ReplyTimes = riak_kv_put_core:reply_times(PutCore),
+    Timings2 = 
+        lists:foldl(
+            fun({Idx, Time}, A) ->
+                dict:append(Idx, timer:now_diff(Time, RemoteStartTime), A)
+            end, Timings, ReplyTimes),
+    {noreply, State#state{timings = Timings2}};
 
 %%--------------------------------------------------------------------
 %% @private
@@ -98,6 +107,21 @@ handle_cast({add_reply_times, RemoteStartTime, ReplyTimes},
 %%--------------------------------------------------------------------
 handle_cast(_Msg, State) ->
     {noreply, State}.
+
+handle_info(update, State = #state{timings = Timings, timing_table = TimingTable}) ->
+    Timings1 = 
+        dict:fold(
+            fun(K, V, A) -> 
+                Calc = 
+                    lists:foldl(
+                        fun(E, A1) ->
+                            A1 + E
+                        end, 0, V),
+                [{K, Calc / length(V)}|A]
+            end, [], Timings),
+    ets:insert(TimingTable, Timings1),
+    schedule_update(),
+    {noreply, State#state{timings = dict:from_list(Timings1)}};
 
 %%--------------------------------------------------------------------
 %% @private
@@ -141,6 +165,6 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-
-
+schedule_update() ->
+    erlang:send_after(?UPDATE_INTERVAL, self(), update).
 
