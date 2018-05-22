@@ -98,6 +98,7 @@
 -export([is_robject/1]).
 -export([update_last_modified/1, update_last_modified/2]).
 -export([strict_descendant/2]).
+-export([has_expiry_epoch/1]).
 
 %% @doc Constructor for new riak objects.
 -spec new(Bucket::bucket(), Key::key(), Value::value()) -> riak_object().
@@ -668,6 +669,18 @@ legacy_hash(Obj=#r_object{}) ->
 vclock_hash(Obj=#r_object{}) ->
     Hash = erlang:phash2(lists:sort(vclock(Obj))),
     term_to_binary(Hash).
+
+%% @doc check if the any sibling has an expiry epoch.
+has_expiry_epoch(Object=#r_object{}) ->
+    MDs = get_metadatas(Object),
+    ExpiryEpochs =
+        lists:foldl(fun(MD, A) -> 
+                            case dict:find(?MD_EXPIRY, MD) of 
+                                error -> [0|A]; 
+                                {ok, ExpiryEpoch} -> [ExpiryEpoch|A] 
+                            end
+                    end, [], MDs), 
+    lists:max(ExpiryEpochs).
 
 %% @doc  Set the updated metadata of an object to M.
 -spec update_metadata(riak_object(), riak_object_dict()) -> riak_object().

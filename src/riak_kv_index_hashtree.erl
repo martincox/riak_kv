@@ -591,7 +591,13 @@ hash_object({Bucket, Key}, RObj0, Version) ->
             true -> RObj0;
             false -> riak_object:from_binary(Bucket, Key, RObj0)
         end,
-        riak_object:hash(RObj, Version)
+        RObjHash = riak_object:hash(RObj, Version),
+        case riak_object:has_expiry_epoch(RObj) of
+            false -> RObjHash;
+            ExpiryEpoch -> 
+                lager:info("inserting ~p with an expiry epoch: ~p", [Key, ExpiryEpoch]),
+                term_to_binary({RObjHash, ExpiryEpoch})
+        end
     catch _:_ ->
             Null = erlang:phash2(<<>>),
             term_to_binary(Null)
