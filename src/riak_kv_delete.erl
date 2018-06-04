@@ -27,6 +27,7 @@
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
+-include_lib("riak_kv_vnode.hrl").
 -include("riak_kv_wm_raw.hrl").
 
 -export([start_link/6, start_link/7, start_link/8, delete/8]).
@@ -73,6 +74,7 @@ delete(ReqId,Bucket,Key,Options,Timeout,Client,ClientId,undefined) ->
             end
     end;
 delete(ReqId,Bucket,Key,Options,Timeout,Client,ClientId,VClock) ->
+    DeleteMode = delete_mode(Bucket),
     riak_core_dtrace:put_tag(io_lib:format("~p,~p", [Bucket, Key])),
     ?DTRACE(?C_DELETE_INIT2, [0], []),
     case get_w_options(Bucket, Options) of
@@ -80,25 +82,28 @@ delete(ReqId,Bucket,Key,Options,Timeout,Client,ClientId,VClock) ->
             ?DTRACE(?C_DELETE_INIT2, [-1], []),
             Client ! {ReqId, {error, Reason}};
         {W, PW, DW, PassThruOptions} ->
-            Obj0 = riak_object:new(Bucket, Key, <<>>, dict:store(?MD_DELETED,
-                                                                 "true", dict:new())),
-            Tombstone = riak_object:set_vclock(Obj0, VClock),
+            Tombstone = create_tombstone(VClock, Bucket, Key, DeleteMode),
             {ok,C} = riak:local_client(ClientId),
             Reply = C:put(Tombstone, [{w,W},{pw,PW},{dw, DW},{timeout,Timeout}]++PassThruOptions),
             Client ! {ReqId, Reply},
-            HasCustomN_val = proplists:get_value(n_val, Options) /= undefined,
-            case Reply of
-                ok when HasCustomN_val == false ->
-                    ?DTRACE(?C_DELETE_INIT2, [1], [<<"reap">>]),
-                    {ok, C2} = riak:local_client(),
-                    AsyncTimeout = 60*1000,     % Avoid client-specified value
-                    Res = C2:get(Bucket, Key, all, AsyncTimeout),
-                    ?DTRACE(?C_DELETE_REAPER_GET_DONE, [1], [<<"reap">>]),
-                    Res;
-                _ ->
-                    ?DTRACE(?C_DELETE_INIT2, [2], [<<"nop">>]),
-                    nop
-            end
+            maybe_reap(Bucket, Key, Reply, Options, DeleteMode)
+    end.
+
+maybe_reap(_Bucket, _Key, _Reply, _Options, {backend_reap, _BackendreapThreshold}) ->
+    nop;
+maybe_reap(Bucket, Key, Reply, Options, normal) ->
+    HasCustomN_val = proplists:get_value(n_val, Options) /= undefined,
+    case Reply of
+        ok when HasCustomN_val == false ->
+            ?DTRACE(?C_DELETE_INIT2, [1], [<<"reap">>]),
+            {ok, C2} = riak:local_client(),
+            AsyncTimeout = 60*1000,     % Avoid client-specified value
+            Res = C2:get(Bucket, Key, all, AsyncTimeout),
+            ?DTRACE(?C_DELETE_REAPER_GET_DONE, [1], [<<"reap">>]),
+            Res;
+        _ ->
+            ?DTRACE(?C_DELETE_INIT2, [2], [<<"nop">>]),
+            nop
     end.
 
 get_r_options(Bucket, Options) ->
@@ -193,6 +198,162 @@ get_w_options(Bucket, Options) ->
 extract_passthru_options(Options) ->
     [Opt || {K, _} = Opt <- Options,
             K == sloppy_quorum orelse K == n_val].
+
+create_tombstone(VClock, Bucket, Key, DeleteMode) ->
+    Tombstone0 = riak_object:new(Bucket, Key, <<>>, dict:store(?MD_DELETED, "true", dict:new())),
+    Tombstone1 = riak_object:set_vclock(Tombstone0, VClock),
+    maybe_backend_reap(Tombstone1, DeleteMode).
+
+%% Get backend_reap_threshold and if it is non-zero tag the object with an expiry
+%% metadata containing an absolute expiry epoch.
+maybe_backend_reap(Tombstone0, {backend_reap, BackendReapThreshold}) ->
+    TstampExpire = create_expiry_time(BackendReapThreshold),
+    Tombstone1 = riak_object:set_expire_time(Tombstone0, TstampExpire),
+    Tombstone1;
+maybe_backend_reap(Tombstone, _) ->
+    Tombstone.
+
+create_expiry_time(BackendReapThreshold) ->
+    {M, S, _} = os:timestamp(),
+    Now = M * 1000000 + S,
+    Now + BackendReapThreshold.
+
+delete_mode(Bucket) ->
+    case check_backend_reap_module_capability() of
+        false ->
+            normal;
+        true ->
+            case check_backend_reap_core_capability() of
+                false ->
+                    normal;
+                true ->
+                    check_bucket(Bucket)
+            end
+    end.
+
+%% ================================================================================================= %%
+check_backend_reap_module_capability() ->
+    case app_helper:get_env(riak_kv, backend_reap_module_capability, undefined) of
+        undefined ->
+            set_backend_reap_module_capability();
+        BackendReapCap ->
+            BackendReapCap
+    end.
+set_backend_reap_module_capability() ->
+    BackendCaps = case app_helper:get_env(riak_kv, storage_backend, undefined) of
+                      undefined ->
+                          lager:error("undefined riak_kv storage_backend environment variable"),
+                          normal;
+                      riak_kv_multi_backend ->
+                          MultiBackendConfig = app_helper:get_env(riak_kv, multi_backend, []),
+                          find_all_backends_capabilities(MultiBackendConfig, []);
+                      Mod ->
+                          case Mod:capabilities(state) of
+                              {ok, Caps} ->
+                                  Caps;
+                              _ ->
+                                  []
+                          end
+                  end,
+    BackendReapCap =  lists:member(backend_reap, BackendCaps),
+    application:set_env(riak_kv, backend_reap_module_capability, BackendReapCap),
+    BackendReapCap.
+find_all_backends_capabilities([], Caps) ->
+    Caps;
+find_all_backends_capabilities([{_,Backend,_}| Rest], Caps) ->
+    {ok, BackendCaps} = Backend:capabilities(state),
+    find_all_backends_capabilities(Rest, Caps++BackendCaps).
+
+%% ================================================================================================= %%
+check_backend_reap_core_capability() ->
+    case app_helper:get_env(riak_kv, backend_reap_core_capability, false) of
+        false ->
+            BackendreapCoreCap = riak_core_capability:get({riak_kv, backend_reap}, false),
+            application:set_env(riak_kv, backend_reap_core_capability, BackendreapCoreCap),
+            BackendreapCoreCap;
+        true ->
+            true
+    end.
+
+%% ================================================================================================= %%
+check_bucket(Bucket) ->
+    case app_helper:get_env(riak_kv, storage_backend, undefined) of
+        undefined ->
+            lager:error("undefined riak_kv storage_backend environment variable"),
+            normal;
+        riak_kv_multi_backend ->
+            check_backend_reap_module_capability(Bucket);
+        _ ->
+            maybe_get_backend_reap_threshold()
+    end.
+
+check_backend_reap_module_capability(Bucket) ->
+    case app_helper:get_env(riak_kv, bucket_to_backend_reap_capability_dict, undefined) of
+        undefined ->
+            Dict = build_bucket_to_backend_reap_capability_dict(),
+            application:set_env(riak_kv, bucket_to_backend_reap_capability_dict, Dict),
+            check_bucket(Bucket, Dict);
+        Dict ->
+            check_bucket(Bucket, Dict)
+    end.
+
+check_bucket(Bucket, Dict) ->
+    case dict:find(Bucket, Dict) of
+        {ok, false} ->
+            normal;
+        {ok, true} ->
+            maybe_get_backend_reap_threshold();
+        error ->
+            return_default_bucket_backend_capability(Dict)
+    end.
+maybe_get_backend_reap_threshold() ->
+    case app_helper:get_env(riak_kv, backend_reap_threshold, undefined) of
+        undefined ->
+            normal;
+        BackendreapThreshold ->
+            {backend_reap, BackendreapThreshold}
+    end.
+return_default_bucket_backend_capability(Dict) ->
+    case dict:find(default, Dict) of
+        {ok, true} ->
+            maybe_get_backend_reap_threshold();
+        _ ->
+            normal
+    end.
+
+%% ================================================================================================= %%
+build_bucket_to_backend_reap_capability_dict() ->
+    case app_helper:get_env(riak_kv, multi_backend_default, undefined) of
+        undefined ->
+            dict:new();
+        DefaultBucket ->
+            build_bucket_to_backend_reap_capability_dict(DefaultBucket)
+    end.
+build_bucket_to_backend_reap_capability_dict(DefaultBucket) ->
+    case app_helper:get_env(riak_kv, multi_backend, undefined) of
+        undefined ->
+            dict:new();
+        MultiBackendConfig ->
+            build_bucket_to_backend_reap_capability_dict(DefaultBucket, MultiBackendConfig, dict:new())
+    end.
+build_bucket_to_backend_reap_capability_dict(_, [], Dict) ->
+    Dict;
+build_bucket_to_backend_reap_capability_dict(DefaultBucket, [{Bucket, BackendMod, _} | Rest], Dict) ->
+    BackendCaps = case BackendMod:capabilities(state) of
+                      {ok, Caps} ->
+                          Caps;
+                      _ ->
+                          []
+                  end,
+    Key = case DefaultBucket == Bucket of
+              true ->
+                  default;
+              false ->
+                  Bucket
+          end,
+    NewDict = dict:store(Key, lists:member(backend_reap, BackendCaps), Dict),
+    build_bucket_to_backend_reap_capability_dict(DefaultBucket, Rest, NewDict).
+%% ================================================================================================= %%
 
 %% ===================================================================
 %% EUnit tests

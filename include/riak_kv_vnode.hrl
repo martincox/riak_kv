@@ -83,3 +83,5 @@
 %% by AAE tree rebuilds, fullsync, and handoff.
 %% See @link riak_core_background_mgr:get_lock/1
 -define(KV_VNODE_LOCK(Idx), {vnode_lock, Idx}).
+
+-define(DEFAULT_DELETE_MODE, 3000).

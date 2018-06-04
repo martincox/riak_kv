@@ -2367,11 +2367,17 @@ encode_and_put_no_sib_check(Obj, Mod, Bucket, Key, IndexSpecs, ModState,
                         false ->
                             ok
                     end,
-                    PutRet = Mod:put(Bucket, Key, IndexSpecs, EncodedVal,
-                                     ModState),
+                    TstampExpire = riak_object:has_expire_time(Obj),
+                    PutRet = maybe_put_with_expire_time(Bucket, Key, IndexSpecs, 
+                                EncodedVal, Mod, ModState, TstampExpire),
                     {PutRet, EncodedVal}
             end
     end.
+
+maybe_put_with_expire_time(Bucket, Key, IndexSpecs, EncodedVal, Mod, ModState, false) ->
+    Mod:put(Bucket, Key, IndexSpecs, EncodedVal, ModState);
+maybe_put_with_expire_time(Bucket, Key, IndexSpecs, EncodedVal, Mod, ModState, TstampExpire) ->
+    Mod:put(Bucket, Key, IndexSpecs, EncodedVal, TstampExpire, ModState).
 
 uses_r_object(Mod, ModState, Bucket) ->
     {ok, Capabilities} = Mod:capabilities(Bucket, ModState),
