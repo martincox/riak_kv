@@ -591,7 +591,14 @@ hash_object({Bucket, Key}, RObj0, Version) ->
             true -> RObj0;
             false -> riak_object:from_binary(Bucket, Key, RObj0)
         end,
-        riak_object:hash(RObj, Version)
+        RObjHash0 = riak_object:hash(RObj, Version),
+        RObjHash1 = 
+            case riak_object:has_expire_time(RObj) of
+                false -> RObjHash0;
+                ExpireTime ->
+                    <<RObjHash0/binary, ExpireTime/binary>>
+            end,
+        RObjHash1
     catch _:_ ->
             Null = erlang:phash2(<<>>),
             term_to_binary(Null)

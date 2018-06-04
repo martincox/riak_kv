@@ -73,6 +73,7 @@ delete(ReqId,Bucket,Key,Options,Timeout,Client,ClientId,undefined) ->
             end
     end;
 delete(ReqId,Bucket,Key,Options,Timeout,Client,ClientId,VClock) ->
+    DeleteMode = app_helper:get_env(riak_kv, delete_mode),
     riak_core_dtrace:put_tag(io_lib:format("~p,~p", [Bucket, Key])),
     ?DTRACE(?C_DELETE_INIT2, [0], []),
     case get_w_options(Bucket, Options) of
@@ -80,9 +81,7 @@ delete(ReqId,Bucket,Key,Options,Timeout,Client,ClientId,VClock) ->
             ?DTRACE(?C_DELETE_INIT2, [-1], []),
             Client ! {ReqId, {error, Reason}};
         {W, PW, DW, PassThruOptions} ->
-            Obj0 = riak_object:new(Bucket, Key, <<>>, dict:store(?MD_DELETED,
-                                                                 "true", dict:new())),
-            Tombstone = riak_object:set_vclock(Obj0, VClock),
+            Tombstone = create_tombstone(VClock, Bucket, Key, DeleteMode),
             {ok,C} = riak:local_client(ClientId),
             Reply = C:put(Tombstone, [{w,W},{pw,PW},{dw, DW},{timeout,Timeout}]++PassThruOptions),
             Client ! {ReqId, Reply},
@@ -193,6 +192,27 @@ get_w_options(Bucket, Options) ->
 extract_passthru_options(Options) ->
     [Opt || {K, _} = Opt <- Options,
             K == sloppy_quorum orelse K == n_val].
+
+create_tombstone(VClock, Bucket, Key, DeleteMode) ->
+    Tombstone0 = riak_object:new(Bucket, Key, <<>>, dict:store(?MD_DELETED, "true", dict:new())),
+    Tombstone1 = riak_object:set_vclock(Tombstone0, VClock),
+    maybe_backend_reap(Tombstone1, DeleteMode).
+
+%% Get backend_reap_threshold and if it is non-zero tag the object with an expiry
+%% metadata containing an absolute expiry epoch.
+maybe_backend_reap(Tombstone0, {backend_reap, BackendReapThreshold}) ->
+    ExpiryTime = create_expiry_time(BackendReapThreshold),
+    MD0 = riak_object:get_update_metadata(Tombstone0),
+    MD1 = dict:store(?MD_EXPIRE, ExpiryTime, MD0),
+    Tombstone1 = riak_object:update_metadata(Tombstone0, MD1),
+    Tombstone1;
+maybe_backend_reap(Tombstone, _) ->
+    Tombstone.
+
+create_expiry_time(BackendReapThreshold) ->
+    {M, S, _} = os:timestamp(),
+    Now = M * 1000000 + S,
+    Now + BackendReapThreshold.
 
 %% ===================================================================
 %% EUnit tests

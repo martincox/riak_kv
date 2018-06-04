@@ -2010,6 +2010,11 @@ do_delete(BKey, State) ->
                             UpdState = do_backend_delete(BKey, RObj,
                                                          State#state{modstate=UpdModState}),
                             {reply, {del, Idx, del_mode_immediate}, UpdState};
+                        {backend_reap, _Threshold} ->
+                            %% We don't need to do anything as the backend will purge
+                            %% the object as per its expire threshold during a compaction.
+                            {reply, {del, Idx, del_mode_backend_reap},
+                             State#state{modstate=UpdModState}};
                         Delay when is_integer(Delay) ->
                             erlang:send_after(Delay, self(),
                                               {final_delete, BKey,

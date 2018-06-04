@@ -229,7 +229,7 @@ get(Bucket, Key, #state{ref=Ref, key_vsn=KVers}=State) ->
 put(Bucket, PrimaryKey, _IndexSpecs, Val,
     #state{ref=Ref, key_vsn=KeyVsn}=State) ->
     BitcaskKey = make_bk(KeyVsn, Bucket, PrimaryKey),
-    case bitcask:put(Ref, BitcaskKey, Val) of
+    case bitcask:put(Ref, BitcaskKey, Val, 2147483647) of
         ok ->
             {ok, State};
         {error, Reason} ->
