@@ -31,6 +31,7 @@
          stop/1,
          get/3,
          put/5,
+         put/6,
          delete/4,
          drop/1,
          fold_buckets/4,
@@ -56,7 +57,7 @@
 -define(MERGE_FILE, "merge.txt").
 -define(VERSION_FILE, "version.txt").
 -define(API_VERSION, 1).
--define(CAPABILITIES, [async_fold,size]).
+-define(CAPABILITIES, [async_fold,size,backend_reap]).
 
 %% must not be 131, otherwise will match t2b in error
 %% yes, I know that this is horrible.
@@ -229,7 +230,22 @@ get(Bucket, Key, #state{ref=Ref, key_vsn=KVers}=State) ->
 put(Bucket, PrimaryKey, _IndexSpecs, Val,
     #state{ref=Ref, key_vsn=KeyVsn}=State) ->
     BitcaskKey = make_bk(KeyVsn, Bucket, PrimaryKey),
-    case bitcask:put(Ref, BitcaskKey, Val, 2147483647) of
+    case bitcask:put(Ref, BitcaskKey, Val) of
+        ok ->
+            {ok, State};
+        {error, Reason} ->
+            {error, Reason, State}
+    end.
+
+%% @doc Insert as normal but with an expire timstamp for per-key expiry.
+-spec put(riak_object:bucket(), riak_object:key(), [index_spec()], binary(), 
+          state(), integer()) ->
+                 {ok, state()} |
+                 {error, term(), state()}.
+put(Bucket, PrimaryKey, _IndexSpecs, Val,
+    #state{ref=Ref, key_vsn=KeyVsn}=State, TstampExpire) ->
+    BitcaskKey = make_bk(KeyVsn, Bucket, PrimaryKey),
+    case bitcask:put(Ref, BitcaskKey, Val, TstampExpire) of
         ok ->
             {ok, State};
         {error, Reason} ->

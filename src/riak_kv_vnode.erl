@@ -2012,7 +2012,7 @@ do_delete(BKey, State) ->
                             {reply, {del, Idx, del_mode_immediate}, UpdState};
                         {backend_reap, _Threshold} ->
                             %% We don't need to do anything as the backend will purge
-                            %% the object as per its expire threshold during a compaction.
+                            %% the object as per its expir ethreshold during a compaction.
                             {reply, {del, Idx, del_mode_backend_reap},
                              State#state{modstate=UpdModState}};
                         Delay when is_integer(Delay) ->
@@ -2349,7 +2349,12 @@ encode_and_put_no_sib_check(Obj, Mod, Bucket, Key, IndexSpecs, ModState,
         true ->
             %% Non binary returning backends will have to handle size warnings
             %% and errors themselves.
-            Mod:put_object(Bucket, Key, IndexSpecs, Obj, ModState);
+            case riak_object:has_expire_time(Obj) of
+                false ->
+                    Mod:put_object(Bucket, Key, IndexSpecs, Obj, ModState);
+                TstampExpire ->
+                    Mod:put_object(Bucket, Key, IndexSpecs, Obj, ModState, TstampExpire)
+            end;
         false ->
             ObjFmt = riak_core_capability:get({riak_kv, object_format}, v0),
             EncodedVal = riak_object:to_binary(ObjFmt, Obj),
@@ -2372,8 +2377,15 @@ encode_and_put_no_sib_check(Obj, Mod, Bucket, Key, IndexSpecs, ModState,
                         false ->
                             ok
                     end,
-                    PutRet = Mod:put(Bucket, Key, IndexSpecs, EncodedVal,
-                                     ModState),
+                    PutRet =
+                        case riak_object:has_expire_time(Obj) of
+                            false ->
+                                Mod:put(Bucket, Key, IndexSpecs, EncodedVal, 
+                                               ModState);
+                            TstampExpire ->
+                                Mod:put(Bucket, Key, IndexSpecs, EncodedVal, 
+                                               ModState, TstampExpire)
+                        end,
                     {PutRet, EncodedVal}
             end
     end.

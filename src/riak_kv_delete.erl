@@ -85,19 +85,24 @@ delete(ReqId,Bucket,Key,Options,Timeout,Client,ClientId,VClock) ->
             {ok,C} = riak:local_client(ClientId),
             Reply = C:put(Tombstone, [{w,W},{pw,PW},{dw, DW},{timeout,Timeout}]++PassThruOptions),
             Client ! {ReqId, Reply},
-            HasCustomN_val = proplists:get_value(n_val, Options) /= undefined,
-            case Reply of
-                ok when HasCustomN_val == false ->
-                    ?DTRACE(?C_DELETE_INIT2, [1], [<<"reap">>]),
-                    {ok, C2} = riak:local_client(),
-                    AsyncTimeout = 60*1000,     % Avoid client-specified value
-                    Res = C2:get(Bucket, Key, all, AsyncTimeout),
-                    ?DTRACE(?C_DELETE_REAPER_GET_DONE, [1], [<<"reap">>]),
-                    Res;
-                _ ->
-                    ?DTRACE(?C_DELETE_INIT2, [2], [<<"nop">>]),
-                    nop
-            end
+            maybe_reap(Bucket, Key, Reply, Options, DeleteMode)
+    end.
+
+maybe_reap(_Bucket, _Key, _Reply, _Options, {backend_reap, _}) ->
+    nop;
+maybe_reap(Bucket, Key, Reply, Options, _) ->
+    HasCustomN_val = proplists:get_value(n_val, Options) /= undefined,
+    case Reply of
+        ok when HasCustomN_val == false ->
+            ?DTRACE(?C_DELETE_INIT2, [1], [<<"reap">>]),
+            {ok, C2} = riak:local_client(),
+            AsyncTimeout = 60*1000,     % Avoid client-specified value
+            Res = C2:get(Bucket, Key, all, AsyncTimeout),
+            ?DTRACE(?C_DELETE_REAPER_GET_DONE, [1], [<<"reap">>]),
+            Res;
+        _ ->
+            ?DTRACE(?C_DELETE_INIT2, [2], [<<"nop">>]),
+            nop
     end.
 
 get_r_options(Bucket, Options) ->
@@ -201,10 +206,8 @@ create_tombstone(VClock, Bucket, Key, DeleteMode) ->
 %% Get backend_reap_threshold and if it is non-zero tag the object with an expiry
 %% metadata containing an absolute expiry epoch.
 maybe_backend_reap(Tombstone0, {backend_reap, BackendReapThreshold}) ->
-    ExpiryTime = create_expiry_time(BackendReapThreshold),
-    MD0 = riak_object:get_update_metadata(Tombstone0),
-    MD1 = dict:store(?MD_EXPIRE, ExpiryTime, MD0),
-    Tombstone1 = riak_object:update_metadata(Tombstone0, MD1),
+    TstampExpire = create_expiry_time(BackendReapThreshold),
+    Tombstone1 = riak_object:set_expiry_time(Tombstone0, TstampExpire),
     Tombstone1;
 maybe_backend_reap(Tombstone, _) ->
     Tombstone.
