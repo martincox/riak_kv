@@ -210,13 +210,18 @@ final_action(GetCore = #getcore{n = N, merged = Merged0, results = Results,
                                   riak_object:strict_descendant(MObj, RObj)] ++
                               [{Idx, notfound} || {Idx, {error, notfound}} <- Results]
                   end,
+    HasExpire = case riak_object:has_expire_time(MObj) of
+                    false -> false;
+                    _ -> true
+                end,
     Action = case ReadRepairs of
                  [] when ObjState == tombstone ->
                      %% Allow delete if merge object is deleted,
                      %% there are no read repairs pending and
                      %% a value was received from all vnodes
                      case riak_kv_util:is_x_deleted(MObj) andalso
-                         length([xx || {_Idx, {ok, _RObj}} <- Results]) == N of
+                         length([xx || {_Idx, {ok, _RObj}} <- Results]) == N andalso 
+                         not HasExpire of
                          true ->
                              delete;
                          _ ->

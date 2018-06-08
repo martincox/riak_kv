@@ -1198,15 +1198,25 @@ decode_vclock(Method, VClock) ->
 
 -spec set_expire_time(riak_object(), integer()) -> riak_object().
 set_expire_time(#r_object{} = RObj0, TstampExpire) ->
-    MD0 = riak_object:get_metadata(RObj0),
+    MD0 = riak_object:get_update_metadata(RObj0),
     MD1 = dict:store(?MD_EXPIRE, TstampExpire, MD0),
     RObj1 = riak_object:update_metadata(RObj0, MD1),
     RObj1.
 
+%% Check all contents of the object and validate that all values are set to be 
+%% expired. If so, take the max expire tstamp.
 -spec has_expire_time(riak_object()) -> false | integer().
 has_expire_time(#r_object{} = RObj) ->
-    MD0 = riak_object:get_metadata(RObj),
-    case dict:find(?MD_EXPIRE, MD0) of
+    case [O || O = {MD, _} <- riak_object:get_contents(RObj), 
+                              dict:is_key(?MD_EXPIRE, MD) =:= false] of
+        [] ->
+            lists:max([expire_time(MD) || {MD, _} <- riak_object:get_contents(RObj)]);
+        _ -> false
+    end.
+
+-spec expire_time(riak_object_dict()) -> false | integer().
+expire_time(MD) ->
+    case dict:find(?MD_EXPIRE, MD) of
         error -> false;
         {ok, TstampExpire} -> TstampExpire
     end.

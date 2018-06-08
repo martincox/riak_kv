@@ -207,7 +207,7 @@ create_tombstone(VClock, Bucket, Key, DeleteMode) ->
 %% metadata containing an absolute expiry epoch.
 maybe_backend_reap(Tombstone0, {backend_reap, BackendReapThreshold}) ->
     TstampExpire = create_expiry_time(BackendReapThreshold),
-    Tombstone1 = riak_object:set_expiry_time(Tombstone0, TstampExpire),
+    Tombstone1 = riak_object:set_expire_time(Tombstone0, TstampExpire),
     Tombstone1;
 maybe_backend_reap(Tombstone, _) ->
     Tombstone.
