@@ -100,9 +100,11 @@
 %% Default: 1 MB limit / 100 ms wait
 -define(DEFAULT_BUILD_THROTTLE, {1000000, 100}).
 
--define(ERL_SMALL_INT_VERSION, binary:at(term_to_binary(255), 1)).
--define(ERL_LARGE_INT_VERSION, binary:at(term_to_binary(256), 1)).
--define(ERL_INT_LENGTH(V), case V of ?ERL_SMALL_INT_VERSION -> 3; ?ERL_LARGE_INT_VERSION -> 6 end).
+%% Int byte sizes for small and large int binaries.
+-define(SMALL_INT_VER, 97).
+-define(LARGE_INT_VER, 98).
+-define(SMALL_INT_BYTES, 3).
+-define(LARGE_INT_BYTES, 6).
 
 %%%===================================================================
 %%% API
@@ -596,6 +598,9 @@ hash_object({Bucket, Key}, RObj0, Version) ->
             false -> riak_object:from_binary(Bucket, Key, RObj0)
         end,
         RObjHash0 = riak_object:hash(RObj, Version),
+        %% Check if the object has an expiry time. If it does, add the epoch to
+        %% the hash. This is matched out in the hashtree and is used to drop hashes
+        %% when the epoch has elapsed. See `hashtree_itr_filter_expired/3`.
         RObjHash1 = 
             case riak_object:has_expire_time(RObj) of
                 false -> RObjHash0;
@@ -1212,33 +1217,38 @@ maybe_callback(undefined) ->
 maybe_callback(Callback) ->
     Callback().
 
-hashtree_itr_filter_expired(K, <<_:1/binary, IntVersion, R/binary>>, TreeState) ->
-    Size = ?ERL_INT_LENGTH(IntVersion),
-    <<H:Size/binary, Epoch/binary>> = R,
+%% Fun that is used in the core hashtree for filtering from the itr when building the 
+%% hashtree. We check the integer version to determine the number of bytes used by
+%% the int, this enables us to check if a given hash has a tstamp for which is
+%% should expire. 
+%%
+%% The riak_object clock is hashed using phash2, which will return an int between 
+%% 0..(2^31)-1, when converted to a binary, this could be either 3 or 6 bytes. We
+%% need to know this size so we can match the epoch from the binary (if it has one).
+hashtree_itr_filter_expired(K, <<_:1/binary, IntVer:1/binary, R/binary>>, TreeState) ->
+    IntSize = int_byte_size(IntVer),
+    <<H:IntSize/binary, Epoch/binary>> = R,
     maybe_filter_expired(K, H, Epoch, TreeState).
 
+%% The epoch is an empty binary -- this hash doesnt have one. Just return the KV.
 maybe_filter_expired(K, H, <<>>, _TreeState) -> [{K, H}];
 maybe_filter_expired(K, H, Epoch, TreeState) ->
     do_filter_expired(K, H, Epoch, TreeState, now_epoch()).
 
+%% If the epoch hasnt been hit yet, the KV is still valid, return it. Otherwise, 
+%% delete it from the hashtree and return an empty list to exclude it from the 
+%% hashtree itr, which means that it wont be exchanged with other replicas.
 do_filter_expired(K, H, Epoch, _TreeState, Now) when Now < Epoch -> [{K, H}];
 do_filter_expired(K, _H, _Epoch, TreeState, _Now) ->
     hashtree:delete(K, TreeState),
     [].
 
-%% The value may have been encoded with an hash and expiry epoch. In that latter
-%% case, we take the epoch and check if it has elapsed. Otherwise, we return the
-%% KV pair and add it to the accumulator as normal.
-%%
-%% The inclusion of an expiry epoch enables a disjoin between the hashtree and other
-%% components when expiring keys; the backend for example. Both can expire keys as 
-%% per their designated epoch without the need for coordination between them.
-%%
-%% Check if an expiry epoch has elapsed. If it has we need to discard the entry from
-%% the tree. We check this because the KV may have been expired elsewhere, but is
-%% orphaned in the tree until a rebuild takes place.
-
 now_epoch() ->
     {M, S, _} = os:timestamp(),
     Now = M * 1000000 + S,
     Now.
+
+%% Determine the size of an int as per its erlang version byte. This can be 3 or
+%% 6 bytes.
+int_byte_size(?SMALL_INT_VER) -> ?SMALL_INT_BYTES;
+int_byte_size(?LARGE_INT_VER) -> ?LARGE_INT_BYTES.
