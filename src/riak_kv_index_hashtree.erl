@@ -100,6 +100,10 @@
 %% Default: 1 MB limit / 100 ms wait
 -define(DEFAULT_BUILD_THROTTLE, {1000000, 100}).
 
+-define(ERL_SMALL_INT_VERSION, binary:at(term_to_binary(255), 1)).
+-define(ERL_LARGE_INT_VERSION, binary:at(term_to_binary(256), 1)).
+-define(ERL_INT_LENGTH(V), case V of ?ERL_SMALL_INT_VERSION -> 3; ?ERL_LARGE_INT_VERSION -> 6 end).
+
 %%%===================================================================
 %%% API
 %%%===================================================================
@@ -716,7 +720,8 @@ do_new_tree(Id, State=#state{trees=Trees, path=Path}, MarkType) ->
     IdBin = tree_id(Id),
     NewTree0 = case Trees of
                   [] ->
-                      hashtree:new({Index,IdBin}, [{segment_path, Path}]);
+                      hashtree:new({Index,IdBin}, [{segment_path, Path}, 
+                                                   {itr_filter_fun, fun hashtree_itr_filter_expired/3}]);
                   [{_,Other}|_] ->
                       hashtree:new({Index,IdBin}, Other)
                end,
@@ -1206,3 +1211,34 @@ maybe_callback(undefined) ->
     ok;
 maybe_callback(Callback) ->
     Callback().
+
+hashtree_itr_filter_expired(K, <<_:1/binary, IntVersion, R/binary>>, TreeState) ->
+    Size = ?ERL_INT_LENGTH(IntVersion),
+    <<H:Size/binary, Epoch/binary>> = R,
+    maybe_filter_expired(K, H, Epoch, TreeState).
+
+maybe_filter_expired(K, H, <<>>, _TreeState) -> [{K, H}];
+maybe_filter_expired(K, H, Epoch, TreeState) ->
+    do_filter_expired(K, H, Epoch, TreeState, now_epoch()).
+
+do_filter_expired(K, H, Epoch, _TreeState, Now) when Now < Epoch -> [{K, H}];
+do_filter_expired(K, _H, _Epoch, TreeState, _Now) ->
+    hashtree:delete(K, TreeState),
+    [].
+
+%% The value may have been encoded with an hash and expiry epoch. In that latter
+%% case, we take the epoch and check if it has elapsed. Otherwise, we return the
+%% KV pair and add it to the accumulator as normal.
+%%
+%% The inclusion of an expiry epoch enables a disjoin between the hashtree and other
+%% components when expiring keys; the backend for example. Both can expire keys as 
+%% per their designated epoch without the need for coordination between them.
+%%
+%% Check if an expiry epoch has elapsed. If it has we need to discard the entry from
+%% the tree. We check this because the KV may have been expired elsewhere, but is
+%% orphaned in the tree until a rebuild takes place.
+
+now_epoch() ->
+    {M, S, _} = os:timestamp(),
+    Now = M * 1000000 + S,
+    Now.
