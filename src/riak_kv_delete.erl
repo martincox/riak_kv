@@ -73,7 +73,7 @@ delete(ReqId,Bucket,Key,Options,Timeout,Client,ClientId,undefined) ->
             end
     end;
 delete(ReqId,Bucket,Key,Options,Timeout,Client,ClientId,VClock) ->
-    DeleteMode = app_helper:get_env(riak_kv, delete_mode),
+    DeleteMode = delete_mode(),
     riak_core_dtrace:put_tag(io_lib:format("~p,~p", [Bucket, Key])),
     ?DTRACE(?C_DELETE_INIT2, [0], []),
     case get_w_options(Bucket, Options) of
@@ -216,6 +216,26 @@ create_expiry_time(BackendReapThreshold) ->
     {M, S, _} = os:timestamp(),
     Now = M * 1000000 + S,
     Now + BackendReapThreshold.
+
+-define(DEFAULT_DELETE_MODE, 3000).
+
+delete_mode() ->
+    DeleteMode = app_helper:get_env(riak_kv, delete_mode, 3000),
+    delete_mode(DeleteMode).
+delete_mode({backend_reap, Threshold, disabled}) ->
+    check_backend_reap_capability(Threshold);
+delete_mode({backend_reap, _Threshold, enabled} = DeleteMode) -> DeleteMode;
+delete_mode(DeleteMode) -> DeleteMode.
+
+check_backend_reap_capability(Threshold) ->
+    check_backend_reap_capability(riak_core_capability:get({riak_kv, backend_reap}, disabled), Threshold).
+check_backend_reap_capability(enabled, Threshold) ->
+    DeleteMode = {backend_reap, Threshold, enabled},
+    ok = application:set_env(riak_kv, delete_mode, DeleteMode),
+    DeleteMode;
+check_backend_reap_capability(disabled, _Threshold) ->
+    ?DEFAULT_DELETE_MODE.
+
 
 %% ===================================================================
 %% EUnit tests

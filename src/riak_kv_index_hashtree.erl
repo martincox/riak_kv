@@ -1230,7 +1230,8 @@ hashtree_itr_filter_expired(K, <<_:1/binary, IntVer:1/binary, R/binary>>, TreeSt
     <<H:IntSize/binary, Epoch/binary>> = R,
     maybe_filter_expired(K, H, Epoch, TreeState).
 
-%% The epoch is an empty binary -- this hash doesnt have one. Just return the KV.
+%% The epoch is an empty binary -- this hash doesnt have an expiry. Just return the KV
+%% to the iterator in hashtree.
 maybe_filter_expired(K, H, <<>>, _TreeState) -> [{K, H}];
 maybe_filter_expired(K, H, Epoch, TreeState) ->
     do_filter_expired(K, H, Epoch, TreeState, now_epoch()).
