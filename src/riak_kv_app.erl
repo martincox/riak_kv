@@ -204,7 +204,7 @@ start(_Type, _StartArgs) ->
 
             riak_core_capability:register({riak_kv, backend_reap},
                                           [true, false],
-                                          disabled),
+                                          false),
 
             HealthCheckOn = app_helper:get_env(riak_kv, enable_health_checks, false),
             %% Go ahead and mark the riak_kv service as up in the node watcher.
