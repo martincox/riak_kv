@@ -27,6 +27,7 @@
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
+-include_lib("riak_kv_vnode.hrl").
 -include("riak_kv_wm_raw.hrl").
 
 -export([start_link/6, start_link/7, start_link/8, delete/8]).
@@ -217,10 +218,8 @@ create_expiry_time(BackendReapThreshold) ->
     Now = M * 1000000 + S,
     Now + BackendReapThreshold.
 
--define(DEFAULT_DELETE_MODE, 3000).
-
 delete_mode() ->
-    DeleteMode = app_helper:get_env(riak_kv, delete_mode, 3000),
+    DeleteMode = app_helper:get_env(riak_kv, delete_mode, ?DEFAULT_DELETE_MODE),
     delete_mode(DeleteMode).
 delete_mode({backend_reap, Threshold, disabled}) ->
     check_backend_reap_capability(Threshold);
@@ -228,12 +227,12 @@ delete_mode({backend_reap, _Threshold, enabled} = DeleteMode) -> DeleteMode;
 delete_mode(DeleteMode) -> DeleteMode.
 
 check_backend_reap_capability(Threshold) ->
-    check_backend_reap_capability(riak_core_capability:get({riak_kv, backend_reap}, disabled), Threshold).
-check_backend_reap_capability(enabled, Threshold) ->
+    check_backend_reap_capability(riak_core_capability:get({riak_kv, backend_reap}, false), Threshold).
+check_backend_reap_capability(true, Threshold) ->
     DeleteMode = {backend_reap, Threshold, enabled},
     ok = application:set_env(riak_kv, delete_mode, DeleteMode),
     DeleteMode;
-check_backend_reap_capability(disabled, _Threshold) ->
+check_backend_reap_capability(false, _Threshold) ->
     ?DEFAULT_DELETE_MODE.
 
 
