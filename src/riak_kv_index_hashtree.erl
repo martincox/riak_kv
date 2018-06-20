@@ -101,8 +101,8 @@
 -define(DEFAULT_BUILD_THROTTLE, {1000000, 100}).
 
 %% Int byte sizes for small and large int binaries.
--define(SMALL_INT_VER, 97).
--define(LARGE_INT_VER, 98).
+-define(SMALL_INT_VER, <<"97">>).
+-define(LARGE_INT_VER, <<"98">>).
 -define(SMALL_INT_BYTES, 3).
 -define(LARGE_INT_BYTES, 6).
 
@@ -605,7 +605,7 @@ hash_object({Bucket, Key}, RObj0, Version) ->
             case riak_object:has_expire_time(RObj) of
                 false -> RObjHash0;
                 ExpireTime ->
-                    <<RObjHash0/binary, ExpireTime/binary>>
+                    <<RObjHash0/binary, ExpireTime:32/integer>>
             end,
         RObjHash1
     catch _:_ ->
@@ -1225,15 +1225,15 @@ maybe_callback(Callback) ->
 %% The riak_object clock is hashed using phash2, which will return an int between 
 %% 0..(2^31)-1, when converted to a binary, this could be either 3 or 6 bytes. We
 %% need to know this size so we can match the epoch from the binary (if it has one).
-hashtree_itr_filter_expired(K, <<_:1/binary, IntVer:1/binary, R/binary>>, TreeState) ->
+hashtree_itr_filter_expired(K, <<_:1/binary, IntVer:1/binary, _/binary>> = Bin, TreeState) ->
     IntSize = int_byte_size(IntVer),
-    <<H:IntSize/binary, Epoch/binary>> = R,
+    <<H:IntSize/binary, Epoch/binary>> = Bin,
     maybe_filter_expired(K, H, Epoch, TreeState).
 
 %% The epoch is an empty binary -- this hash doesnt have an expiry. Just return the KV
 %% to the iterator in hashtree.
 maybe_filter_expired(K, H, <<>>, _TreeState) -> [{K, H}];
-maybe_filter_expired(K, H, Epoch, TreeState) ->
+maybe_filter_expired(K, H, <<Epoch:32/integer>>, TreeState) ->
     do_filter_expired(K, H, Epoch, TreeState, now_epoch()).
 
 %% If the epoch hasnt been hit yet, the KV is still valid, return it. Otherwise, 
