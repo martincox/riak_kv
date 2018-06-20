@@ -101,8 +101,8 @@
 -define(DEFAULT_BUILD_THROTTLE, {1000000, 100}).
 
 %% Int byte sizes for small and large int binaries.
--define(SMALL_INT_VER, <<"97">>).
--define(LARGE_INT_VER, <<"98">>).
+-define(SMALL_INT_VER, <<97>>).
+-define(LARGE_INT_VER, <<98>>).
 -define(SMALL_INT_BYTES, 3).
 -define(LARGE_INT_BYTES, 6).
 
