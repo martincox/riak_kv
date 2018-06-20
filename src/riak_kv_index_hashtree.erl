@@ -63,7 +63,8 @@
          destroy/1,
          index_2i_n/0,
          get_trees/1,
-         get_version/1]).
+         get_version/1,
+         hashtree_itr_filter_expired/3]).
 
 -export([poke/1,
          get_build_time/1]).
@@ -726,7 +727,7 @@ do_new_tree(Id, State=#state{trees=Trees, path=Path}, MarkType) ->
     NewTree0 = case Trees of
                   [] ->
                       hashtree:new({Index,IdBin}, [{segment_path, Path}, 
-                                                   {itr_filter_fun, fun hashtree_itr_filter_expired/3}]);
+                                                   {itr_filter_fun, fun ?MODULE:hashtree_itr_filter_expired/3}]);
                   [{_,Other}|_] ->
                       hashtree:new({Index,IdBin}, Other)
                end,
