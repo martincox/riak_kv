@@ -40,7 +40,8 @@
          status/1,
          callback/3]).
 
--export([data_size/1]).
+-export([data_size/1,
+         key_transform_to_1/1]).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -61,8 +62,9 @@
 %% must not be 131, otherwise will match t2b in error
 %% yes, I know that this is horrible.
 -define(VERSION_1, 1).
--define(VERSION_BYTE, ?VERSION_1).
--define(CURRENT_KEY_TRANS, fun key_transform_to_1/1).
+-define(VERSION_2, 2).
+-define(VERSION_BYTE, ?VERSION_2).
+-define(CURRENT_KEY_TRANS, fun key_transform_to_2/1).
 
 -record(state, {ref :: reference(),
                 data_dir :: string(),
@@ -96,17 +98,40 @@ capabilities(_, _) ->
     {ok, ?CAPABILITIES}.
 
 %% @doc Transformation functions for the keys coming off the disk.
+key_transform_to_2(<<?VERSION_BYTE:6, _:1, _Rest/binary>> = Key) ->
+    Key;
+key_transform_to_2(<<?VERSION_1:7, 0:1, BucketSz:16/integer, 
+                     Bucket:BucketSz/binary, Key/binary>>) ->
+    make_bk(?VERSION_BYTE, Bucket, Key);
+key_transform_to_2(<<?VERSION_1:7, 1:1, TypeSz:16/integer, Type:TypeSz/binary, 
+                     BucketSz:16/integer, Bucket:BucketSz/binary, Key/binary>>) ->
+    make_bk(?VERSION_BYTE, {Type, Bucket}, Key);
+key_transform_to_2(<<131:8,_Rest/bits>> = Key0) ->
+    {Bucket, Key} = binary_to_term(Key0),
+    make_bk(?VERSION_BYTE, Bucket, Key).
+
 key_transform_to_1(<<?VERSION_1:7, _:1, _Rest/binary>> = Key) ->
     Key;
 key_transform_to_1(<<131:8,_Rest/bits>> = Key0) ->
     {Bucket, Key} = binary_to_term(Key0),
-    make_bk(?VERSION_BYTE, Bucket, Key).
+    make_bk(?VERSION_1, Bucket, Key).
 
 key_transform_to_0(<<?VERSION_1:7,_Rest/bits>> = Key0) ->
     term_to_binary(bk_to_tuple(Key0));
 key_transform_to_0(<<131:8,_Rest/binary>> = Key) ->
     Key.
 
+bk_to_tuple(<<?VERSION_2:6, HasType:1, 0:1, Sz:16/integer,
+             TypeOrBucket:Sz/bytes, Rest/binary>>) ->
+    case HasType of
+        0 ->
+            %% no type, first field is bucket
+            {TypeOrBucket, Rest};
+        1 ->
+            %% has a tyoe, extract bucket as well
+            <<BucketSz:16/integer, Bucket:BucketSz/bytes, Key/binary>> = Rest,
+            {{TypeOrBucket, Bucket}, Key}
+    end;
 bk_to_tuple(<<?VERSION_1:7, HasType:1, Sz:16/integer,
              TypeOrBucket:Sz/bytes, Rest/binary>>) ->
     case HasType of
@@ -126,11 +151,15 @@ make_bk(0, Bucket, Key) ->
 make_bk(1, {Type, Bucket}, Key) ->
     TypeSz = size(Type),
     BucketSz = size(Bucket),
-    <<?VERSION_BYTE:7, 1:1, TypeSz:16/integer, Type/binary,
+    <<?VERSION_1:7, 1:1, TypeSz:16/integer, Type/binary,
       BucketSz:16/integer, Bucket/binary, Key/binary>>;
 make_bk(1, Bucket, Key) ->
     BucketSz = size(Bucket),
-    <<?VERSION_BYTE:7, 0:1, BucketSz:16/integer,
+    <<?VERSION_1:7, 0:1, BucketSz:16/integer,
+     Bucket/binary, Key/binary>>;
+make_bk(2, Bucket, Key) ->
+    BucketSz = size(Bucket),
+    <<?VERSION_BYTE:6, 0:1, 0:1, BucketSz:16/integer,
      Bucket/binary, Key/binary>>.
 
 %% @doc Start the bitcask backend
