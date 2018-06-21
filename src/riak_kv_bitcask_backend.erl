@@ -31,6 +31,7 @@
          stop/1,
          get/3,
          put/5,
+         put_with_expire/6,
          delete/4,
          drop/1,
          fold_buckets/4,
@@ -61,7 +62,8 @@
 %% must not be 131, otherwise will match t2b in error
 %% yes, I know that this is horrible.
 -define(VERSION_1, 1).
--define(VERSION_BYTE, ?VERSION_1).
+-define(VERSION_2, 2).
+-define(VERSION_BYTE, ?VERSION_2).
 -define(CURRENT_KEY_TRANS, fun key_transform_to_1/1).
 
 -record(state, {ref :: reference(),
@@ -96,17 +98,43 @@ capabilities(_, _) ->
     {ok, ?CAPABILITIES}.
 
 %% @doc Transformation functions for the keys coming off the disk.
+key_transform_to_1(<<?VERSION_1:7, Type:1, Expire:32/integer, Rest/binary>>) ->
+    {<<?VERSION_2:6, Type:1, 1:1, Rest/binary>>, Expire};
 key_transform_to_1(<<?VERSION_1:7, _:1, _Rest/binary>> = Key) ->
     Key;
 key_transform_to_1(<<131:8,_Rest/bits>> = Key0) ->
     {Bucket, Key} = binary_to_term(Key0),
     make_bk(?VERSION_BYTE, Bucket, Key).
 
+key_transform_to_0(<<?VERSION_2:6,_Rest/bits>> = Key0) ->
+    term_to_binary(bk_to_tuple(Key0));
 key_transform_to_0(<<?VERSION_1:7,_Rest/bits>> = Key0) ->
     term_to_binary(bk_to_tuple(Key0));
 key_transform_to_0(<<131:8,_Rest/binary>> = Key) ->
     Key.
 
+bk_to_tuple(<<?VERSION_2:6, HasType:1, _Expire:1, Sz:16/integer,
+             TypeOrBucket:Sz/bytes, Rest/binary>>) ->
+    case HasType of
+        0 ->
+            %% no type, first field is bucket
+            {TypeOrBucket, Rest};
+        1 ->
+            %% has a tyoe, extract bucket as well
+            <<BucketSz:16/integer, Bucket:BucketSz/bytes, Key/binary>> = Rest,
+            {{TypeOrBucket, Bucket}, Key}
+    end;
+bk_to_tuple(<<?VERSION_2:6, HasType:1, _Expire:1, _Expire:32/integer, Sz:16/integer,
+             TypeOrBucket:Sz/bytes, Rest/binary>>) ->
+    case HasType of
+        0 ->
+            %% no type, first field is bucket
+            {TypeOrBucket, Rest};
+        1 ->
+            %% has a tyoe, extract bucket as well
+            <<BucketSz:16/integer, Bucket:BucketSz/bytes, Key/binary>> = Rest,
+            {{TypeOrBucket, Bucket}, Key}
+    end;
 bk_to_tuple(<<?VERSION_1:7, HasType:1, Sz:16/integer,
              TypeOrBucket:Sz/bytes, Rest/binary>>) ->
     case HasType of
@@ -126,12 +154,24 @@ make_bk(0, Bucket, Key) ->
 make_bk(1, {Type, Bucket}, Key) ->
     TypeSz = size(Type),
     BucketSz = size(Bucket),
-    <<?VERSION_BYTE:7, 1:1, TypeSz:16/integer, Type/binary,
+    <<?VERSION_1:7, 1:1, TypeSz:16/integer, Type/binary,
       BucketSz:16/integer, Bucket/binary, Key/binary>>;
 make_bk(1, Bucket, Key) ->
     BucketSz = size(Bucket),
-    <<?VERSION_BYTE:7, 0:1, BucketSz:16/integer,
+    <<?VERSION_1:7, 0:1, BucketSz:16/integer,
      Bucket/binary, Key/binary>>.
+
+make_bk(2, {Type, Bucket}, Key, Expire) ->
+    TypeSz = size(Type),
+    BucketSz = size(Bucket),
+    KeySz = size(Key),
+    <<?VERSION_1:7, 1:1, Expire:32/integer, TypeSz:16/integer, Type/binary,
+      BucketSz:16/integer, Bucket/binary, KeySz:32/integer, Key/binary>>;
+make_bk(2, Bucket, Key, Expire) ->
+    BucketSz = size(Bucket),
+    KeySz = size(Key),
+    <<?VERSION_1:7, 0:1, Expire:32/integer, BucketSz:16/integer,
+     Bucket/binary, KeySz:32/integer, Key/binary>>.
 
 %% @doc Start the bitcask backend
 -spec start(integer(), config()) -> {ok, state()} | {error, term()}.
@@ -223,6 +263,19 @@ get(Bucket, Key, #state{ref=Ref, key_vsn=KVers}=State) ->
 %% secondary indexing and the_IndexSpecs parameter
 %% is ignored.
 -type index_spec() :: {add, Index, SecondaryKey} | {remove, Index, SecondaryKey}.
+-spec put_with_expire(riak_object:bucket(), riak_object:key(), [index_spec()], binary(), integer(), state()) ->
+                 {ok, state()} |
+                 {error, term(), state()}.
+put_with_expire(Bucket, PrimaryKey, _IndexSpecs, Val, Expire,
+    #state{ref=Ref, key_vsn=KeyVsn}=State) ->
+    BitcaskKey = make_bk(KeyVsn, Bucket, PrimaryKey, Expire),
+    case bitcask:put(Ref, BitcaskKey, Val) of
+        ok ->
+            {ok, State};
+        {error, Reason} ->
+            {error, Reason, State}
+    end.
+
 -spec put(riak_object:bucket(), riak_object:key(), [index_spec()], binary(), state()) ->
                  {ok, state()} |
                  {error, term(), state()}.
