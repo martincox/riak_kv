@@ -206,7 +206,7 @@ create_tombstone(VClock, Bucket, Key, DeleteMode) ->
 
 %% Get backend_reap_threshold and if it is non-zero tag the object with an expiry
 %% metadata containing an absolute expiry epoch.
-maybe_backend_reap(Tombstone0, {backend_reap, BackendReapThreshold}) ->
+maybe_backend_reap(Tombstone0, {backend_reap, BackendReapThreshold, enabled}) ->
     TstampExpire = create_expiry_time(BackendReapThreshold),
     Tombstone1 = riak_object:set_expire_time(Tombstone0, TstampExpire),
     Tombstone1;
