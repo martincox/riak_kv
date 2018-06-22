@@ -229,7 +229,7 @@ delete_mode({backend_reap, _Threshold, enabled} = DeleteMode) -> DeleteMode;
 delete_mode(DeleteMode) -> DeleteMode.
 
 check_backend_reap_capability(Threshold) ->
-    Cap = app_helper:get_env({riak_kv, backend_reap_capability}, false),
+    Cap = app_helper:get_env(riak_kv, backend_reap_capability, false),
     case Cap of
         true ->
             check_backend_reap_capability(riak_core_capability:get({riak_kv, backend_reap}, false), Threshold);
