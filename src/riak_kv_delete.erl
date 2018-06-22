@@ -221,18 +221,29 @@ create_expiry_time(BackendReapThreshold) ->
 delete_mode() ->
     DeleteMode = app_helper:get_env(riak_kv, delete_mode, ?DEFAULT_DELETE_MODE),
     delete_mode(DeleteMode).
+delete_mode({backend_reap, Threshold}) ->
+    check_backend_reap_capability(Threshold);
 delete_mode({backend_reap, Threshold, disabled}) ->
     check_backend_reap_capability(Threshold);
 delete_mode({backend_reap, _Threshold, enabled} = DeleteMode) -> DeleteMode;
 delete_mode(DeleteMode) -> DeleteMode.
 
 check_backend_reap_capability(Threshold) ->
-    check_backend_reap_capability(riak_core_capability:get({riak_kv, backend_reap}, false), Threshold).
+    Cap = app_helper:get_env({riak_kv, backend_reap_capability}, false),
+    case Cap of
+        true ->
+            check_backend_reap_capability(riak_core_capability:get({riak_kv, backend_reap}, false), Threshold);
+        false ->
+            application:set_env(riak_kv, delete_mode, ?DEFAULT_DELETE_MODE),
+            ?DEFAULT_DELETE_MODE
+    end.
 check_backend_reap_capability(true, Threshold) ->
     DeleteMode = {backend_reap, Threshold, enabled},
     ok = application:set_env(riak_kv, delete_mode, DeleteMode),
     DeleteMode;
-check_backend_reap_capability(false, _Threshold) ->
+check_backend_reap_capability(false, Threshold) ->
+    application:set_env(riak_kv, delete_mode,
+        {backend_reap, Threshold, disabled}),
     ?DEFAULT_DELETE_MODE.
 
 

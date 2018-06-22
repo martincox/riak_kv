@@ -503,17 +503,22 @@ init([Index]) ->
             DeleteMode = case app_helper:get_env(riak_kv, delete_mode, ?DEFAULT_DELETE_MODE) of
                              {backend_reap, ReapThreshold} ->
                                  {ok, ModCaps} = Mod:capabilities(ModState),
-                                 case lists:member(backend_reap, ModCaps) andalso
-                                      riak_core_capability:get({riak_kv, backend_reap}) of
-                                     true -> 
+                                 case {lists:member(backend_reap, ModCaps),
+                                      riak_core_capability:get({riak_kv, backend_reap})} of
+                                     {true, true} ->
+                                         lager:info("backend_reap supported and is now active"),
                                          application:set_env(riak_kv, delete_mode, 
                                                              {backend_reap, ReapThreshold, enabled}),
-                                         {backend_reap, ReapThreshold};
-                                     false -> 
-                                         lager:error("backend_reap is enabled but either cluster not
-                                                     capable yet or is unsupported by the backend"),
+                                         {backend_reap, ReapThreshold, enabled};
+                                     {true, false} ->
+                                         lager:info("backend_reap is supported, but the cluster is not ready"),
+                                         application:set_env(riak_kv, backend_reap_capability, true),
                                          application:set_env(riak_kv, delete_mode, 
                                                              {backend_reap, ReapThreshold, disabled}),
+                                         ?DEFAULT_DELETE_MODE;
+                                     {false, _} ->
+                                         lager:error("backend_reap is enabled but is unsupported by the backend"),
+                                         application:set_env(riak_kv, delete_mode, ?DEFAULT_DELETE_MODE),
                                          ?DEFAULT_DELETE_MODE
                                  end;
                              Mode -> Mode
