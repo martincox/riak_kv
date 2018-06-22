@@ -89,7 +89,7 @@ delete(ReqId,Bucket,Key,Options,Timeout,Client,ClientId,VClock) ->
             maybe_reap(Bucket, Key, Reply, Options, DeleteMode)
     end.
 
-maybe_reap(_Bucket, _Key, _Reply, _Options, {backend_reap, _}) ->
+maybe_reap(_Bucket, _Key, _Reply, _Options, {backend_reap, _, _}) ->
     nop;
 maybe_reap(Bucket, Key, Reply, Options, _) ->
     HasCustomN_val = proplists:get_value(n_val, Options) /= undefined,
