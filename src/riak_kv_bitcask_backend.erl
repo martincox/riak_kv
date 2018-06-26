@@ -279,7 +279,8 @@ get(Bucket, Key, #state{ref=Ref, key_vsn=KVers}=State) ->
 put(Bucket, PrimaryKey, _IndexSpecs, Val, TstampExpire,
     #state{ref=Ref, key_vsn=KeyVsn}=State) ->
     BitcaskKey = make_bk(KeyVsn, Bucket, PrimaryKey, TstampExpire),
-    case bitcask:put(Ref, BitcaskKey, Val) of
+    {KeyDirKey, _} = ?CURRENT_KEY_TRANS(BitcaskKey),
+    case bitcask:put(Ref, KeyDirKey, BitcaskKey, Val, TstampExpire) of
         ok ->
             {ok, State};
         {error, Reason} ->
