@@ -31,6 +31,7 @@
          stop/1,
          get/3,
          put/5,
+         put/6,
          delete/4,
          drop/1,
          fold_buckets/4,
@@ -41,7 +42,8 @@
          callback/3]).
 
 -export([data_size/1,
-         key_transform_to_1/1]).
+         key_transform_to_1/1,
+         key_transform_to_2/1]).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -77,6 +79,7 @@
 -type config() :: [{atom(), term()}].
 -type version() :: {non_neg_integer(), non_neg_integer(), non_neg_integer()}.
 
+%%
 %% ===================================================================
 %% Public API
 %% ===================================================================
@@ -98,30 +101,34 @@ capabilities(_, _) ->
     {ok, ?CAPABILITIES}.
 
 %% @doc Transformation functions for the keys coming off the disk.
-key_transform_to_2(<<?VERSION_BYTE:6, _:1, _Rest/binary>> = Key) ->
-    Key;
-key_transform_to_2(<<?VERSION_1:7, 0:1, BucketSz:16/integer, 
+key_transform_to_2(<<?VERSION_BYTE:7, Type:1/integer, TstampExpire:32/integer, Rest/binary>>) ->
+    {<<?VERSION_BYTE:7, Type:1/integer, Rest/binary>>, #keymeta{tstamp_expire = TstampExpire}};
+key_transform_to_2(<<?VERSION_1:7, _:1, BucketSz:16/integer, 
                      Bucket:BucketSz/binary, Key/binary>>) ->
-    make_bk(?VERSION_BYTE, Bucket, Key);
+    {make_bk(?VERSION_BYTE, Bucket, Key), #keymeta{}};
 key_transform_to_2(<<?VERSION_1:7, 1:1, TypeSz:16/integer, Type:TypeSz/binary, 
                      BucketSz:16/integer, Bucket:BucketSz/binary, Key/binary>>) ->
-    make_bk(?VERSION_BYTE, {Type, Bucket}, Key);
+    {make_bk(?VERSION_BYTE, {Type, Bucket}, Key), #keymeta{}};
 key_transform_to_2(<<131:8,_Rest/bits>> = Key0) ->
     {Bucket, Key} = binary_to_term(Key0),
-    make_bk(?VERSION_BYTE, Bucket, Key).
+    {make_bk(?VERSION_BYTE, Bucket, Key), #keymeta{}}.
 
+key_transform_to_1(<<?VERSION_2:7, Type:1, _:32, Rest/binary>>) ->
+    <<?VERSION_1:7, Type:1, Rest/binary>>;
 key_transform_to_1(<<?VERSION_1:7, _:1, _Rest/binary>> = Key) ->
     Key;
 key_transform_to_1(<<131:8,_Rest/bits>> = Key0) ->
     {Bucket, Key} = binary_to_term(Key0),
     make_bk(?VERSION_1, Bucket, Key).
 
+key_transform_to_0(<<?VERSION_2:7,_Rest/bits>> = Key0) ->
+    term_to_binary(bk_to_tuple(Key0));
 key_transform_to_0(<<?VERSION_1:7,_Rest/bits>> = Key0) ->
     term_to_binary(bk_to_tuple(Key0));
 key_transform_to_0(<<131:8,_Rest/binary>> = Key) ->
     Key.
 
-bk_to_tuple(<<?VERSION_2:6, HasType:1, 0:1, Sz:16/integer,
+bk_to_tuple(<<?VERSION_2:7, HasType:1, _:32, Sz:16/integer,
              TypeOrBucket:Sz/bytes, Rest/binary>>) ->
     case HasType of
         0 ->
@@ -157,9 +164,23 @@ make_bk(1, Bucket, Key) ->
     BucketSz = size(Bucket),
     <<?VERSION_1:7, 0:1, BucketSz:16/integer,
      Bucket/binary, Key/binary>>;
+make_bk(2, {Type, Bucket}, Key) ->
+    TypeSz = size(Type),
+    BucketSz = size(Bucket),
+    <<?VERSION_BYTE:7, 1:1, 0:32, TypeSz:16/integer, Type/binary, BucketSz:16/integer,
+     Bucket/binary, Key/binary>>;
 make_bk(2, Bucket, Key) ->
     BucketSz = size(Bucket),
-    <<?VERSION_BYTE:6, 0:1, 0:1, BucketSz:16/integer,
+    <<?VERSION_BYTE:7, 0:1, 0:32, BucketSz:16/integer,
+     Bucket/binary, Key/binary>>.
+make_bk(2, {Type, Bucket}, Key, TstampExpire) ->
+    TypeSz = size(Type),
+    BucketSz = size(Bucket),
+    <<?VERSION_BYTE:7, 0:1, TstampExpire:32/integer, TypeSz:16/integer, Type/binary, BucketSz:16/integer,
+     Bucket/binary, Key/binary>>;
+make_bk(2, Bucket, Key, TstampExpire) ->
+    BucketSz = size(Bucket),
+    <<?VERSION_BYTE:7, 1:1, TstampExpire:32/integer, BucketSz:16/integer,
      Bucket/binary, Key/binary>>.
 
 %% @doc Start the bitcask backend
@@ -252,6 +273,19 @@ get(Bucket, Key, #state{ref=Ref, key_vsn=KVers}=State) ->
 %% secondary indexing and the_IndexSpecs parameter
 %% is ignored.
 -type index_spec() :: {add, Index, SecondaryKey} | {remove, Index, SecondaryKey}.
+-spec put(riak_object:bucket(), riak_object:key(), [index_spec()], binary(), integer(), state()) ->
+                 {ok, state()} |
+                 {error, term(), state()}.
+put(Bucket, PrimaryKey, _IndexSpecs, Val, TstampExpire,
+    #state{ref=Ref, key_vsn=KeyVsn}=State) ->
+    BitcaskKey = make_bk(KeyVsn, Bucket, PrimaryKey, TstampExpire),
+    case bitcask:put(Ref, BitcaskKey, Val) of
+        ok ->
+            {ok, State};
+        {error, Reason} ->
+            {error, Reason, State}
+    end.
+
 -spec put(riak_object:bucket(), riak_object:key(), [index_spec()], binary(), state()) ->
                  {ok, state()} |
                  {error, term(), state()}.
