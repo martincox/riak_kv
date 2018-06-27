@@ -105,30 +105,42 @@ key_transform_to_2(<<?VERSION_BYTE:7, Type:1/integer, TstampExpire:32/integer, R
     {<<?VERSION_BYTE:7, Type:1/integer, Rest/binary>>, #keymeta{tstamp_expire = TstampExpire}};
 key_transform_to_2(<<?VERSION_1:7, _:1, BucketSz:16/integer, 
                      Bucket:BucketSz/binary, Key/binary>>) ->
-    {make_bk(?VERSION_BYTE, Bucket, Key), #keymeta{}};
+    {make_kd(?VERSION_BYTE, Bucket, Key), #keymeta{tstamp_expire = ?DEFAULT_TSTAMP_EXPIRE}};
 key_transform_to_2(<<?VERSION_1:7, 1:1, TypeSz:16/integer, Type:TypeSz/binary, 
                      BucketSz:16/integer, Bucket:BucketSz/binary, Key/binary>>) ->
-    {make_bk(?VERSION_BYTE, {Type, Bucket}, Key), #keymeta{}};
+    {make_kd(?VERSION_BYTE, {Type, Bucket}, Key), #keymeta{tstamp_expire = ?DEFAULT_TSTAMP_EXPIRE}};
 key_transform_to_2(<<131:8,_Rest/bits>> = Key0) ->
     {Bucket, Key} = binary_to_term(Key0),
-    {make_bk(?VERSION_BYTE, Bucket, Key), #keymeta{}}.
+    {make_kd(?VERSION_BYTE, Bucket, Key), #keymeta{tstamp_expire = ?DEFAULT_TSTAMP_EXPIRE}}.
 
-key_transform_to_1(<<?VERSION_2:7, Type:1, _:32, Rest/binary>>) ->
-    <<?VERSION_1:7, Type:1, Rest/binary>>;
+key_transform_to_1(<<?VERSION_2:7, Type:1/integer, _:32, Rest/binary>>) ->
+    {<<?VERSION_1:7, Type:1, Rest/binary>>, #keymeta{}};
 key_transform_to_1(<<?VERSION_1:7, _:1, _Rest/binary>> = Key) ->
-    Key;
+    {Key, #keymeta{}};
 key_transform_to_1(<<131:8,_Rest/bits>> = Key0) ->
     {Bucket, Key} = binary_to_term(Key0),
-    make_bk(?VERSION_1, Bucket, Key).
+    {make_bk(?VERSION_1, Bucket, Key), #keymeta{}}.
 
 key_transform_to_0(<<?VERSION_2:7,_Rest/bits>> = Key0) ->
-    term_to_binary(bk_to_tuple(Key0));
+    {term_to_binary(bk_to_tuple_0(Key0)), #keymeta{}};
 key_transform_to_0(<<?VERSION_1:7,_Rest/bits>> = Key0) ->
-    term_to_binary(bk_to_tuple(Key0));
+    {term_to_binary(bk_to_tuple(Key0)), #keymeta{}};
 key_transform_to_0(<<131:8,_Rest/binary>> = Key) ->
-    Key.
+    {Key, #keymeta{}}.
 
-bk_to_tuple(<<?VERSION_2:7, HasType:1, _:32, Sz:16/integer,
+bk_to_tuple_0(<<?VERSION_2:7, HasType:1, _:32, Sz:16/integer,
+             TypeOrBucket:Sz/bytes, Rest/binary>>) ->
+    case HasType of
+        0 ->
+            %% no type, first field is bucket
+            {TypeOrBucket, Rest};
+        1 ->
+            %% has a tyoe, extract bucket as well
+            <<BucketSz:16/integer, Bucket:BucketSz/bytes, Key/binary>> = Rest,
+            {{TypeOrBucket, Bucket}, Key}
+    end.
+
+bk_to_tuple(<<?VERSION_2:7, HasType:1, Sz:16/integer,
              TypeOrBucket:Sz/bytes, Rest/binary>>) ->
     case HasType of
         0 ->
@@ -167,20 +179,41 @@ make_bk(1, Bucket, Key) ->
 make_bk(2, {Type, Bucket}, Key) ->
     TypeSz = size(Type),
     BucketSz = size(Bucket),
-    <<?VERSION_BYTE:7, 1:1, 0:32, TypeSz:16/integer, Type/binary, BucketSz:16/integer,
-     Bucket/binary, Key/binary>>;
+    <<?VERSION_BYTE:7, 1:1, ?DEFAULT_TSTAMP_EXPIRE:32/integer, TypeSz:16/integer, 
+      Type/binary, BucketSz:16/integer, Bucket/binary, Key/binary>>;
 make_bk(2, Bucket, Key) ->
     BucketSz = size(Bucket),
-    <<?VERSION_BYTE:7, 0:1, 0:32, BucketSz:16/integer,
+    <<?VERSION_BYTE:7, 0:1, ?DEFAULT_TSTAMP_EXPIRE:32/integer, BucketSz:16/integer,
      Bucket/binary, Key/binary>>.
 make_bk(2, {Type, Bucket}, Key, TstampExpire) ->
     TypeSz = size(Type),
     BucketSz = size(Bucket),
-    <<?VERSION_BYTE:7, 0:1, TstampExpire:32/integer, TypeSz:16/integer, Type/binary, BucketSz:16/integer,
-     Bucket/binary, Key/binary>>;
+    <<?VERSION_BYTE:7, 0:1, TstampExpire:32/integer, TypeSz:16/integer, Type/binary, 
+      BucketSz:16/integer, Bucket/binary, Key/binary>>;
 make_bk(2, Bucket, Key, TstampExpire) ->
     BucketSz = size(Bucket),
     <<?VERSION_BYTE:7, 1:1, TstampExpire:32/integer, BucketSz:16/integer,
+     Bucket/binary, Key/binary>>.
+
+make_kd(0, Bucket, Key) ->
+    term_to_binary({Bucket, Key});
+make_kd(1, {Type, Bucket}, Key) ->
+    TypeSz = size(Type),
+    BucketSz = size(Bucket),
+    <<?VERSION_1:7, 1:1, TypeSz:16/integer, Type/binary,
+      BucketSz:16/integer, Bucket/binary, Key/binary>>;
+make_kd(1, Bucket, Key) ->
+    BucketSz = size(Bucket),
+    <<?VERSION_1:7, 0:1, BucketSz:16/integer,
+     Bucket/binary, Key/binary>>;
+make_kd(2, {Type, Bucket}, Key) ->
+    TypeSz = size(Type),
+    BucketSz = size(Bucket),
+    <<?VERSION_BYTE:7, 1:1, TypeSz:16/integer, 
+      Type/binary, BucketSz:16/integer, Bucket/binary, Key/binary>>;
+make_kd(2, Bucket, Key) ->
+    BucketSz = size(Bucket),
+    <<?VERSION_BYTE:7, 0:1, BucketSz:16/integer,
      Bucket/binary, Key/binary>>.
 
 %% @doc Start the bitcask backend
@@ -252,7 +285,7 @@ stop(#state{ref=Ref}) ->
                  {error, not_found, state()} |
                  {error, term(), state()}.
 get(Bucket, Key, #state{ref=Ref, key_vsn=KVers}=State) ->
-    BitcaskKey = make_bk(KVers, Bucket, Key),
+    BitcaskKey = make_kd(KVers, Bucket, Key),
     case bitcask:get(Ref, BitcaskKey) of
         {ok, Value} ->
             {ok, Value, State};
@@ -308,7 +341,7 @@ put(Bucket, PrimaryKey, _IndexSpecs, Val,
                     {ok, state()}.
 delete(Bucket, Key, _IndexSpecs,
        #state{ref=Ref, key_vsn=KeyVsn}=State) ->
-    BitcaskKey = make_bk(KeyVsn, Bucket, Key),
+    BitcaskKey = make_kd(KeyVsn, Bucket, Key),
     ok = bitcask:delete(Ref, BitcaskKey),
     {ok, State}.
 
