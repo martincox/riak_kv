@@ -1226,10 +1226,12 @@ maybe_callback(Callback) ->
 %% The riak_object clock is hashed using phash2, which will return an int between 
 %% 0..(2^31)-1, when converted to a binary, this could be either 3 or 6 bytes. We
 %% need to know this size so we can match the epoch from the binary (if it has one).
-hashtree_itr_filter_expired(K, <<_:1/binary, IntVer:1/binary, _/binary>> = Bin, TreeState) ->
+hashtree_itr_filter_expired(<<$t, _/binary>> = K, <<_:1/binary, IntVer:1/binary, _/binary>> = Bin, TreeState) ->
     IntSize = int_byte_size(IntVer),
     <<H:IntSize/binary, Epoch/binary>> = Bin,
-    maybe_filter_expired(K, H, Epoch, TreeState).
+    maybe_filter_expired(K, H, Epoch, TreeState);
+hashtree_itr_filter_expired(K, H, _TreeState) ->
+    [{K,H}].
 
 %% The epoch is an empty binary -- this hash doesnt have an expiry. Just return the KV
 %% to the iterator in hashtree.
