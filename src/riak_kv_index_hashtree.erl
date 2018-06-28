@@ -1253,4 +1253,5 @@ now_epoch() ->
 %% Determine the size of an int as per its erlang version byte. This can be 3 or
 %% 6 bytes.
 int_byte_size(?SMALL_INT_VER) -> ?SMALL_INT_BYTES;
-int_byte_size(?LARGE_INT_VER) -> ?LARGE_INT_BYTES.
+int_byte_size(?LARGE_INT_VER) -> ?LARGE_INT_BYTES;
+int_byte_size(X) -> lager:error("Unmatched bytes ~p", [X]).
