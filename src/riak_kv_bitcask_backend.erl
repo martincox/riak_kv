@@ -323,21 +323,6 @@ put(Bucket, PrimaryKey, _IndexSpecs, Val,
             {error, Reason, State}
     end.
 
-%% @doc Insert as normal but with an expire timstamp for per-key expiry.
--spec put(riak_object:bucket(), riak_object:key(), [index_spec()], binary(), 
-          state(), integer()) ->
-                 {ok, state()} |
-                 {error, term(), state()}.
-put(Bucket, PrimaryKey, _IndexSpecs, Val,
-    #state{ref=Ref, key_vsn=KeyVsn}=State, TstampExpire) ->
-    BitcaskKey = make_bk(KeyVsn, Bucket, PrimaryKey),
-    case bitcask:put(Ref, BitcaskKey, Val, TstampExpire) of
-        ok ->
-            {ok, State};
-        {error, Reason} ->
-            {error, Reason, State}
-    end.
-
 %% @doc Delete an object from the bitcask backend
 %% NOTE: The bitcask backend does not currently support
 %% secondary indexing and the_IndexSpecs parameter
