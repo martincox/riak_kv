@@ -726,10 +726,11 @@ do_new_tree(Id, State=#state{trees=Trees, path=Path}, MarkType) ->
     IdBin = tree_id(Id),
     NewTree0 = case Trees of
                   [] ->
-                      hashtree:new({Index,IdBin}, [{segment_path, Path}, 
-                                                   {itr_filter_fun, fun ?MODULE:hashtree_itr_filter_expired/3}]);
+                      Opts = maybe_add_itr_filter_fun(Id),
+                      hashtree:new({Index,IdBin}, [{segment_path, Path}|Opts]);
                   [{_,Other}|_] ->
-                      hashtree:new({Index,IdBin}, Other)
+                      Opts = maybe_add_itr_filter_fun(Id),
+                      hashtree:new({Index,IdBin}, Other, Opts)
                end,
     NewTree1 = case MarkType of
                    mark_empty -> hashtree:mark_open_empty(Id, NewTree0);
@@ -737,6 +738,9 @@ do_new_tree(Id, State=#state{trees=Trees, path=Path}, MarkType) ->
                end,
     Trees2 = orddict:store(Id, NewTree1, Trees),
     State#state{trees=Trees2}.
+
+maybe_add_itr_filter_fun(?INDEX_2I_N) -> [];
+maybe_add_itr_filter_fun(_) -> [{itr_filter_fun, fun ?MODULE:hashtree_itr_filter_expired/3}].
 
 %% This function never uses the Type field. Unsure why it is part of the API. Maybe was meant to be used
 %% by the background manager which could manage tokens based on Type atom. Best guess...
