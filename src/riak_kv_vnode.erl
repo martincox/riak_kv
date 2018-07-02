@@ -140,7 +140,7 @@
                 modstate :: term(),
                 mrjobs :: term(),
                 vnodeid :: undefined | binary(),
-                delete_mode :: keep | immediate | pos_integer() | {backend_reap, pos_integer()},
+                delete_mode :: keep | immediate | pos_integer(),
                 bucket_buf_size :: pos_integer(),
                 index_buf_size :: pos_integer(),
                 key_buf_size :: pos_integer(),
@@ -475,6 +475,7 @@ init([Index]) ->
                            non_neg_env(riak_kv, counter_lease_size, ?DEFAULT_CNTR_LEASE)),
     {ok, StatusMgr} = riak_kv_vnode_status_mgr:start_link(self(), Index, UseEpochCounter),
     {ok, {VId, CounterState}} = get_vnodeid_and_counter(StatusMgr, CounterLeaseSize, UseEpochCounter),
+    DeleteMode = app_helper:get_env(riak_kv, delete_mode, 3000),
     AsyncFolding = app_helper:get_env(riak_kv, async_folds, true) == true,
     MDCacheSize = app_helper:get_env(riak_kv, vnode_md_cache_size),
     MDCache =
@@ -497,32 +498,14 @@ init([Index]) ->
                 _ ->
                     false
             end,
-            %% Check what the delete_mode is set to. In the case of backend_reap, check
-            %% that the backend supports it and that the capability is enabled in
-            %% the cluster.
-            DeleteMode = case app_helper:get_env(riak_kv, delete_mode, ?DEFAULT_DELETE_MODE) of
-                             {backend_reap, ReapThreshold} ->
-                                 {ok, ModCaps} = Mod:capabilities(ModState),
-                                 case {lists:member(backend_reap, ModCaps),
-                                      riak_core_capability:get({riak_kv, backend_reap})} of
-                                     {true, true} ->
-                                         lager:info("backend_reap supported and is now active"),
-                                         application:set_env(riak_kv, delete_mode, 
-                                                             {backend_reap, ReapThreshold, enabled}),
-                                         {backend_reap, ReapThreshold, enabled};
-                                     {true, false} ->
-                                         lager:info("backend_reap is supported, but the cluster is not ready"),
-                                         application:set_env(riak_kv, backend_reap_capability, true),
-                                         application:set_env(riak_kv, delete_mode, 
-                                                             {backend_reap, ReapThreshold, disabled}),
-                                         ?DEFAULT_DELETE_MODE;
-                                     {false, _} ->
-                                         lager:error("backend_reap is enabled but is unsupported by the backend"),
-                                         application:set_env(riak_kv, delete_mode, ?DEFAULT_DELETE_MODE),
-                                         ?DEFAULT_DELETE_MODE
-                                 end;
-                             Mode -> Mode
-                         end,
+            BackendCaps = case Mod:capabilities(ModState) of
+                                   {ok, Caps} ->
+                                       Caps;
+                                   _ ->
+                                       []
+                               end,
+            BackendReapCap =  lists:member(backend_reap, BackendCaps),
+            application:set_env(riak_kv, backend_reap_module_capability, BackendReapCap),
             State = #state{idx=Index,
                            async_folding=AsyncFolding,
                            mod=Mod,
