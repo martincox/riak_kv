@@ -74,7 +74,6 @@ delete(ReqId,Bucket,Key,Options,Timeout,Client,ClientId,undefined) ->
             end
     end;
 delete(ReqId,Bucket,Key,Options,Timeout,Client,ClientId,VClock) ->
-    DeleteMode = delete_mode(),
     riak_core_dtrace:put_tag(io_lib:format("~p,~p", [Bucket, Key])),
     ?DTRACE(?C_DELETE_INIT2, [0], []),
     case get_w_options(Bucket, Options) of
@@ -82,7 +81,8 @@ delete(ReqId,Bucket,Key,Options,Timeout,Client,ClientId,VClock) ->
             ?DTRACE(?C_DELETE_INIT2, [-1], []),
             Client ! {ReqId, {error, Reason}};
         {W, PW, DW, PassThruOptions} ->
-            Tombstone = create_tombstone(VClock, Bucket, Key, DeleteMode),
+            BackendReapThreshold = app_helper:get_env(riak_kv, backend_reap_threshold, false),
+            Tombstone = create_tombstone(VClock, Bucket, Key, BackendReapThreshold),
             {ok,C} = riak:local_client(ClientId),
             Reply = C:put(Tombstone, [{w,W},{pw,PW},{dw, DW},{timeout,Timeout}]++PassThruOptions),
             Client ! {ReqId, Reply},
@@ -199,53 +199,33 @@ extract_passthru_options(Options) ->
     [Opt || {K, _} = Opt <- Options,
             K == sloppy_quorum orelse K == n_val].
 
-create_tombstone(VClock, Bucket, Key, DeleteMode) ->
+create_tombstone(VClock, Bucket, Key, BackendReapThreshold) ->
     Tombstone0 = riak_object:new(Bucket, Key, <<>>, dict:store(?MD_DELETED, "true", dict:new())),
     Tombstone1 = riak_object:set_vclock(Tombstone0, VClock),
-    maybe_backend_reap(Tombstone1, DeleteMode).
+    maybe_backend_reap(Tombstone1, BackendReapThreshold).
 
-%% Get backend_reap_threshold and if it is non-zero tag the object with an expiry
-%% metadata containing an absolute expiry epoch.
-maybe_backend_reap(Tombstone0, {backend_reap, BackendReapThreshold, enabled}) ->
+maybe_backend_reap(Tombstone, undefined) ->
+    Tombstone;
+maybe_backend_reap(Tombstone, BackendReapThreshold) ->
+    BackendReapCap = riak_core_capability:get({riak_kv, backend_reap}, false),
+    do_backend_reap(Tombstone, BackendReapThreshold, BackendReapCap).
+
+do_backend_reap(Tombstone, _BackendReapThreshold, false) -> Tombstone;
+do_backend_reap(Tombstone, BackendReapThreshold, true) ->
+    BackendSupported = check_backend_supports_reaping(Bucket),
     TstampExpire = create_expiry_time(BackendReapThreshold),
-    Tombstone1 = riak_object:set_expire_time(Tombstone0, TstampExpire),
-    Tombstone1;
-maybe_backend_reap(Tombstone, _) ->
-    Tombstone.
+    Tombstone1 = riak_object:set_expire_time(Tombstone, TstampExpire),
+    Tombstone1.
 
+check_backend_supports_reaping(Bucket) ->
+    
+
+    BucketProps = riak_core_bucket:get_bucket(Bucket),
+    BackendName = proplists:get_value(backend, BucketProps, DefaultBackend),
 create_expiry_time(BackendReapThreshold) ->
     {M, S, _} = os:timestamp(),
     Now = M * 1000000 + S,
     Now + BackendReapThreshold.
-
-delete_mode() ->
-    DeleteMode = app_helper:get_env(riak_kv, delete_mode, ?DEFAULT_DELETE_MODE),
-    delete_mode(DeleteMode).
-delete_mode({backend_reap, Threshold}) ->
-    check_backend_reap_capability(Threshold);
-delete_mode({backend_reap, Threshold, disabled}) ->
-    check_backend_reap_capability(Threshold);
-delete_mode({backend_reap, _Threshold, enabled} = DeleteMode) -> DeleteMode;
-delete_mode(DeleteMode) -> DeleteMode.
-
-check_backend_reap_capability(Threshold) ->
-    Cap = app_helper:get_env(riak_kv, backend_reap_capability, false),
-    case Cap of
-        true ->
-            check_backend_reap_capability(riak_core_capability:get({riak_kv, backend_reap}, false), Threshold);
-        false ->
-            application:set_env(riak_kv, delete_mode, ?DEFAULT_DELETE_MODE),
-            ?DEFAULT_DELETE_MODE
-    end.
-check_backend_reap_capability(true, Threshold) ->
-    DeleteMode = {backend_reap, Threshold, enabled},
-    ok = application:set_env(riak_kv, delete_mode, DeleteMode),
-    DeleteMode;
-check_backend_reap_capability(false, Threshold) ->
-    application:set_env(riak_kv, delete_mode,
-        {backend_reap, Threshold, disabled}),
-    ?DEFAULT_DELETE_MODE.
-
 
 %% ===================================================================
 %% EUnit tests
