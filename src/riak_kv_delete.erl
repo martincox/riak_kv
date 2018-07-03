@@ -265,11 +265,20 @@ check_bucket(Bucket, Dict) ->
     case dict:find(Bucket, Dict) of
         {ok, false} ->
             normal;
+        {ok, true} ->
+            maybe_get_backend_reap_threshold();
+        error ->
+            return_default_bucket_backend_capability(Dict)
+    end.
+return_default_bucket_backend_capability(Dict) ->
+    case dict:find(default, Dict) of
+        {ok, true} ->
+            maybe_get_backend_reap_threshold();
         _ ->
-            maybe_get_backend_reap_threshold()
+            normal
     end.
 maybe_get_backend_reap_threshold() ->
-    case app_helper:get_env(riak_kv, backend_reap_threshold) of
+    case app_helper:get_env(riak_kv, backend_reap_threshold, undefined) of
         undefined ->
             normal;
         BackendreapThreshold ->
