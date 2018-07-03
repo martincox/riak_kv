@@ -231,17 +231,11 @@ delete_mode(Bucket) ->
             end
     end.
 
+%% ================================================================================================= %%
 check_backend_reap_module_capability() ->
     app_helper:get_env(riak_kv, backend_reap_module_capability, false).
-check_backend_reap_module_capability(Bucket) ->
-    case app_helper:get_env(riak_kv, build_bucket_to_backend_reap_capability_dict, undefined) of
-        undefined ->
-            Dict = build_bucket_to_backend_reap_capability_dict(),
-            application:set_env(riak_kv, build_bucket_to_backend_reap_capability_dict, Dict),
-            check_bucket(Bucket, Dict);
-        Dict ->
-            check_bucket(Bucket, Dict)
-    end.
+
+%% ================================================================================================= %%
 check_backend_reap_core_capability() ->
     case app_helper:get_env(riak_kv, backend_reap_core_capability, false) of
         false ->
@@ -251,6 +245,8 @@ check_backend_reap_core_capability() ->
         true ->
             true
     end.
+
+%% ================================================================================================= %%
 check_bucket(Bucket) ->
     case app_helper:get_env(riak_kv, storage_backend, undefined) of
         undefined ->
@@ -261,6 +257,17 @@ check_bucket(Bucket) ->
         _ ->
             maybe_get_backend_reap_threshold()
     end.
+
+check_backend_reap_module_capability(Bucket) ->
+    case app_helper:get_env(riak_kv, build_bucket_to_backend_reap_capability_dict, undefined) of
+        undefined ->
+            Dict = build_bucket_to_backend_reap_capability_dict(),
+            application:set_env(riak_kv, build_bucket_to_backend_reap_capability_dict, Dict),
+            check_bucket(Bucket, Dict);
+        Dict ->
+            check_bucket(Bucket, Dict)
+    end.
+
 check_bucket(Bucket, Dict) ->
     case dict:find(Bucket, Dict) of
         {ok, false} ->
@@ -270,13 +277,6 @@ check_bucket(Bucket, Dict) ->
         error ->
             return_default_bucket_backend_capability(Dict)
     end.
-return_default_bucket_backend_capability(Dict) ->
-    case dict:find(default, Dict) of
-        {ok, true} ->
-            maybe_get_backend_reap_threshold();
-        _ ->
-            normal
-    end.
 maybe_get_backend_reap_threshold() ->
     case app_helper:get_env(riak_kv, backend_reap_threshold, undefined) of
         undefined ->
@@ -284,7 +284,15 @@ maybe_get_backend_reap_threshold() ->
         BackendreapThreshold ->
             {backend_reap, BackendreapThreshold}
     end.
+return_default_bucket_backend_capability(Dict) ->
+    case dict:find(default, Dict) of
+        {ok, true} ->
+            maybe_get_backend_reap_threshold();
+        _ ->
+            normal
+    end.
 
+%% ================================================================================================= %%
 build_bucket_to_backend_reap_capability_dict() ->
     case app_helper:get_env(riak_kv, multi_backend_default, undefined) of
         undefined ->
@@ -316,7 +324,7 @@ build_bucket_to_backend_reap_capability_dict(DefaultBucekt, [{Bucket, BackendMod
           end,
     NewDict = dict:store(Key, lists:member(backend_reap, BackendCaps), Dict),
     build_bucket_to_backend_reap_capability_dict(DefaultBucekt, Rest, NewDict).
-
+%% ================================================================================================= %%
 
 %% ===================================================================
 %% EUnit tests
