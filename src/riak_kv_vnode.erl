@@ -498,14 +498,6 @@ init([Index]) ->
                 _ ->
                     false
             end,
-            BackendCaps = case Mod:capabilities(ModState) of
-                                   {ok, Caps} ->
-                                       Caps;
-                                   _ ->
-                                       []
-                               end,
-            BackendReapCap =  lists:member(backend_reap, BackendCaps),
-            application:set_env(riak_kv, backend_reap_module_capability, BackendReapCap),
             State = #state{idx=Index,
                            async_folding=AsyncFolding,
                            mod=Mod,
