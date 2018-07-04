@@ -103,15 +103,15 @@ capabilities(_, _) ->
 %% @doc Transformation functions for the keys coming off the disk.
 key_transform_to_2(<<?VERSION_BYTE:7, Type:1, TstampExpire:32/integer, Rest/binary>>) ->
     {<<?VERSION_BYTE:7, Type:1, Rest/binary>>, #keymeta{tstamp_expire = TstampExpire}};
-key_transform_to_2(<<?VERSION_1:7, _:1, BucketSz:16/integer, 
-                     Bucket:BucketSz/binary, Key/binary>>) ->
+key_transform_to_2(<<?VERSION_1:7, 0:1, BucketSz:16/integer, Bucket:BucketSz/binary, Key/binary>>) ->
     {make_kd(?VERSION_BYTE, Bucket, Key), #keymeta{tstamp_expire = ?DEFAULT_TSTAMP_EXPIRE}};
-key_transform_to_2(<<?VERSION_1:7, 1:1, TypeSz:16/integer, Type:TypeSz/binary, 
-                     BucketSz:16/integer, Bucket:BucketSz/binary, Key/binary>>) ->
+key_transform_to_2(<<?VERSION_1:7, 1:1, TypeSz:16/integer, Type:TypeSz/binary, BucketSz:16/integer, Bucket:BucketSz/binary, Key/binary>>) ->
     {make_kd(?VERSION_BYTE, {Type, Bucket}, Key), #keymeta{tstamp_expire = ?DEFAULT_TSTAMP_EXPIRE}};
 key_transform_to_2(<<131:8,_Rest/bits>> = Key0) ->
     {Bucket, Key} = binary_to_term(Key0),
     {make_kd(?VERSION_BYTE, Bucket, Key), #keymeta{tstamp_expire = ?DEFAULT_TSTAMP_EXPIRE}}.
+
+
 
 key_transform_to_1(<<?VERSION_2:7, Type:1/integer, _:32, Rest/binary>>) ->
     {<<?VERSION_1:7, Type:1, Rest/binary>>, #keymeta{}};
