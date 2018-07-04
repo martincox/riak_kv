@@ -211,37 +211,30 @@ final_action(GetCore = #getcore{n = N, merged = Merged0, results = Results,
                               [{Idx, notfound} || {Idx, {error, notfound}} <- Results]
                   end,
 
-    Action = case MObj of
-                    undefined ->
-                        nop;
+    HasExpire = riak_object:has_expire_time(MObj),
+    Action =
+        case ReadRepairs of
+            [] when ObjState == tombstone ->
+                %% Allow delete if merge object is deleted,
+                %% there are no read repairs pending and
+                %% a value was received from all vnodes
+                case riak_kv_util:is_x_deleted(MObj) andalso
+                    length([xx || {_Idx, {ok, _RObj}} <- Results]) == N andalso
+                    not HasExpire of
+                    true ->
+                        delete;
                     _ ->
-                        HasExpire = case riak_object:has_expire_time(MObj) of
-                             false -> false;
-                             _ -> true
-                         end,
-                        case ReadRepairs of
-                            [] when ObjState == tombstone ->
-                                %% Allow delete if merge object is deleted,
-                                %% there are no read repairs pending and
-                                %% a value was received from all vnodes
-                                case riak_kv_util:is_x_deleted(MObj) andalso
-                                    length([xx || {_Idx, {ok, _RObj}} <- Results]) == N andalso
-                                    not HasExpire of
-                                    true ->
-                                        delete;
-                                    _ ->
-                                        maybe_log_old_vclock(Results),
-                                        nop
-                                end;
-                            [] when ObjState == notfound ->
-                                nop;
-                            [] ->
-                                maybe_log_old_vclock(Results),
-                                nop;
-                            _ ->
-                                {read_repair, ReadRepairs, MObj}
-                        end
-                end,
+                        maybe_log_old_vclock(Results),
+                        nop
+                end;
+            [] when ObjState == notfound ->
+                nop;
+            [] ->
+                maybe_log_old_vclock(Results),
+                nop;
+            _ ->
+                {read_repair, ReadRepairs, MObj}
+        end,
     {Action, GetCore#getcore{merged = Merged}}.
 
 %% Return request info

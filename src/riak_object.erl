@@ -1205,13 +1205,18 @@ set_expire_time(#r_object{} = RObj0, TstampExpire) ->
 
 %% Check all contents of the object and validate that all values are set to be 
 %% expired. If so, take the max expire tstamp.
--spec has_expire_time(riak_object()) -> false | integer().
+-spec has_expire_time(riak_object() | undefined) -> false | integer().
+has_expire_time(undefined) -> false;
 has_expire_time(#r_object{} = RObj) ->
-    case [O || O = {MD, _} <- riak_object:get_contents(RObj), 
-                              dict:is_key(?MD_EXPIRE, MD) =:= false] of
+    case riak_object:get_contents(RObj) of
         [] ->
-            lists:max([expire_time(MD) || {MD, _} <- riak_object:get_contents(RObj)]);
-        _ -> false
+            false;
+        Contents ->
+            case [O || O = {MD, _} <- Contents, dict:is_key(?MD_EXPIRE, MD) =:= false] of
+                [] ->
+                    lists:max([expire_time(MD) || {MD, _} <- Contents]);
+                _ -> false
+            end
     end.
 
 -spec expire_time(riak_object_dict()) -> false | integer().
