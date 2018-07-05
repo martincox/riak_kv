@@ -211,7 +211,12 @@ final_action(GetCore = #getcore{n = N, merged = Merged0, results = Results,
                               [{Idx, notfound} || {Idx, {error, notfound}} <- Results]
                   end,
 
-    HasExpire = riak_object:has_expire_time(MObj),
+    HasExpire = case riak_object:has_expire_time(MObj) of
+                    false ->
+                        false;
+                    _ ->
+                        true
+                end,
     Action =
         case ReadRepairs of
             [] when ObjState == tombstone ->
