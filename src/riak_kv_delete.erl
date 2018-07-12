@@ -218,17 +218,36 @@ create_expiry_time(BackendReapThreshold) ->
     Now = M * 1000000 + S,
     Now + BackendReapThreshold.
 
+
 delete_mode(Bucket) ->
-    case check_backend_reap_module_capability() of
-        false ->
+    case maybe_get_backend_reap_threshold() of
+        normal ->
             normal;
-        true ->
-            case check_backend_reap_core_capability() of
+        BackendReap ->
+            case check_backend_reap_module_capability() of
                 false ->
                     normal;
                 true ->
-                    check_bucket(Bucket)
+                    case check_backend_reap_core_capability() of
+                        false ->
+                            normal;
+                        true ->
+                            case check_bucket(Bucket) of
+                                false ->
+                                    normal;
+                                true ->
+                                    BackendReap
+                            end
+                    end
             end
+    end.
+%% ================================================================================================= %%
+maybe_get_backend_reap_threshold() ->
+    case app_helper:get_env(riak_kv, backend_reap_threshold, undefined) of
+        undefined ->
+            normal;
+        BackendreapThreshold ->
+            {backend_reap, BackendreapThreshold}
     end.
 
 %% ================================================================================================= %%
@@ -280,11 +299,11 @@ check_bucket(Bucket) ->
     case app_helper:get_env(riak_kv, storage_backend, undefined) of
         undefined ->
             lager:error("undefined riak_kv storage_backend environment variable"),
-            normal;
+            false;
         riak_kv_multi_backend ->
             check_backend_reap_module_capability(Bucket);
         _ ->
-            maybe_get_backend_reap_threshold()
+            true
     end.
 
 check_backend_reap_module_capability(Bucket) ->
@@ -299,26 +318,17 @@ check_backend_reap_module_capability(Bucket) ->
 
 check_bucket(Bucket, Dict) ->
     case dict:find(Bucket, Dict) of
-        {ok, false} ->
-            normal;
-        {ok, true} ->
-            maybe_get_backend_reap_threshold();
+        {ok, Boolean} ->
+            Boolean;
         error ->
             return_default_bucket_backend_capability(Dict)
-    end.
-maybe_get_backend_reap_threshold() ->
-    case app_helper:get_env(riak_kv, backend_reap_threshold, undefined) of
-        undefined ->
-            normal;
-        BackendreapThreshold ->
-            {backend_reap, BackendreapThreshold}
     end.
 return_default_bucket_backend_capability(Dict) ->
     case dict:find(default, Dict) of
         {ok, true} ->
-            maybe_get_backend_reap_threshold();
+            true;
         _ ->
-            normal
+            false
     end.
 
 %% ================================================================================================= %%
