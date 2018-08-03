@@ -1246,6 +1246,7 @@ maybe_filter_expired(K, H, <<Epoch:32/integer>>, TreeState) ->
 %% If the epoch hasnt been hit yet, the KV is still valid, return it. Otherwise, 
 %% delete it from the hashtree and return an empty list to exclude it from the 
 %% hashtree itr, which means that it wont be exchanged with other replicas.
+do_filter_expired(K, H, Epoch, _TreeState, _Now) when Epoch == 0 -> [{K, H}];
 do_filter_expired(K, H, Epoch, _TreeState, Now) when Now < Epoch -> [{K, H}];
 do_filter_expired(K, _H, _Epoch, TreeState, _Now) ->
     hashtree:delete(K, TreeState),
